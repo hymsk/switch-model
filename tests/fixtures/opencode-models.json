@@ -1,0 +1,23 @@
+{
+  "providers": {
+    "example": {
+      "id": "example",
+      "name": "Example Provider",
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "example-model": {
+          "id": "example-model",
+          "providerID": "example",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          },
+          "capabilities": {
+            "reasoning": true,
+            "toolcall": true
+          }
+        }
+      }
+    }
+  }
+}

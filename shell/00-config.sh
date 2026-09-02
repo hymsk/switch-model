@@ -17,7 +17,11 @@ DEFAULT_SK_DIR="$HOME/.config/api-keys"
 # SK 文件名（不含路径）
 DEFAULT_SK_FILENAME="default.sk"
 
-# API 提供商 URL；公开版本不连接任何预设服务。
+# 默认 API 服务 URL 文件名（不含路径）
+DEFAULT_URL_FILENAME="default.url"
+DEFAULT_URL_FILE="$DEFAULT_SK_DIR/$DEFAULT_URL_FILENAME"
+
+# API 提供商 URL；环境变量优先于默认 URL 文件。
 DEFAULT_API_URL="${SWITCH_MODEL_BASE_URL:-}"
 
 # Claude 默认模型

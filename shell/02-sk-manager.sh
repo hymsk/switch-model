@@ -70,3 +70,25 @@ read_sk_from_file() {
         ensure_api_keys_protection
     fi
 }
+
+# 从默认 URL 文件读取 API 服务地址；文件不存在时由调用方决定是否报错。
+read_default_url_file() {
+    local file="${1:-$DEFAULT_URL_FILE}"
+    if [ ! -e "$file" ]; then
+        return 0
+    fi
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Error: 默认 URL 路径不是文件: $file${NC}" >&2
+        return 1
+    fi
+    if [ ! -r "$file" ]; then
+        echo -e "${RED}Error: 默认 URL 文件不可读: $file${NC}" >&2
+        return 1
+    fi
+
+    DEFAULT_API_URL=$(tr -d '[:space:]' < "$file")
+    if [ -z "$DEFAULT_API_URL" ]; then
+        echo -e "${RED}Error: 默认 URL 文件为空: $file${NC}" >&2
+        return 1
+    fi
+}

@@ -20,7 +20,13 @@ tests/               # 离线测试与最小 catalog fixture
 - Claude Code、Codex 或 OpenCode 的本地配置目录
 - OpenAI-compatible 模型服务 URL 和 API Key 文件
 
-本项目不配置默认在线服务。每次调用必须提供 URL，或设置 `SWITCH_MODEL_BASE_URL`。
+本项目不配置默认在线服务。可将默认 URL 写入 `~/.config/api-keys/default.url`，文件仅包含一行 URL：
+
+```text
+https://api.example.com
+```
+
+设置后可省略命令行 URL。优先级为命令行 URL、`SWITCH_MODEL_BASE_URL`、`~/.config/api-keys/default.url`。
 
 ## API Key
 

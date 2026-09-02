@@ -1808,7 +1808,11 @@ DEFAULT_SK_DIR="$HOME/.config/api-keys"
 # SK 文件名（不含路径）
 DEFAULT_SK_FILENAME="default.sk"
 
-# API 提供商 URL；公开版本不连接任何预设服务。
+# 默认 API 服务 URL 文件名（不含路径）
+DEFAULT_URL_FILENAME="default.url"
+DEFAULT_URL_FILE="$DEFAULT_SK_DIR/$DEFAULT_URL_FILENAME"
+
+# API 提供商 URL；环境变量优先于默认 URL 文件。
 DEFAULT_API_URL="${SWITCH_MODEL_BASE_URL:-}"
 
 # Claude 默认模型
@@ -1955,6 +1959,28 @@ read_sk_from_file() {
     fi
     if [ "$PREVIEW" != true ]; then
         ensure_api_keys_protection
+    fi
+}
+
+# 从默认 URL 文件读取 API 服务地址；文件不存在时由调用方决定是否报错。
+read_default_url_file() {
+    local file="${1:-$DEFAULT_URL_FILE}"
+    if [ ! -e "$file" ]; then
+        return 0
+    fi
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Error: 默认 URL 路径不是文件: $file${NC}" >&2
+        return 1
+    fi
+    if [ ! -r "$file" ]; then
+        echo -e "${RED}Error: 默认 URL 文件不可读: $file${NC}" >&2
+        return 1
+    fi
+
+    DEFAULT_API_URL=$(tr -d '[:space:]' < "$file")
+    if [ -z "$DEFAULT_API_URL" ]; then
+        echo -e "${RED}Error: 默认 URL 文件为空: $file${NC}" >&2
+        return 1
     fi
 }
 
@@ -2658,11 +2684,11 @@ opencode_main() {
 
 usage() {
     local exit_code="${1:-1}"
-    echo "Usage: $0 <claude|codex|opencode> <url> [model] [--sk-filename <name>] [--sk-file <path>] [--preview]"
+    echo "Usage: $0 <claude|codex|opencode> [url] [model] [--sk-filename <name>] [--sk-file <path>] [--preview]"
     echo ""
     echo "Arguments:"
     echo "  <claude|codex|opencode> 工具模式（必需，作为第一个参数）"
-    echo "  url                     OpenAI-compatible 模型服务 URL；也可设置 SWITCH_MODEL_BASE_URL"
+    echo "  url                     OpenAI-compatible 模型服务 URL；也可写入 $DEFAULT_URL_FILE 或设置 SWITCH_MODEL_BASE_URL"
     echo "  model                   模型名，自动 grep 选择"
     echo "                          - Claude 默认: $DEFAULT_CLAUDE_MODEL"
     echo "                          - Codex 默认: $DEFAULT_CODEX_MODEL"
@@ -2685,6 +2711,7 @@ usage() {
     echo "  # Claude 模式"
     echo "  $0 claude https://api.example.com $DEFAULT_CLAUDE_MODEL"
     echo "  $0 claude https://api.example.com --sk-filename work.sk"
+    echo "  $0 claude  # 使用 $DEFAULT_URL_FILE 中的默认 URL"
     echo ""
     echo "  # Codex 模式"
     echo "  $0 codex https://api.example.com"
@@ -2835,8 +2862,12 @@ while [ "$#" -gt 0 ]; do
 done
 set -- "${POSITIONAL[@]}"
 
+if [ -z "${1:-}" ] && [ -z "$DEFAULT_API_URL" ]; then
+    read_default_url_file || usage
+fi
+
 if [ -z "${1:-$DEFAULT_API_URL}" ]; then
-    echo -e "${RED}Error: 必须提供模型服务 URL，或设置 SWITCH_MODEL_BASE_URL${NC}" >&2
+    echo -e "${RED}Error: 必须提供模型服务 URL，或写入 $DEFAULT_URL_FILE / 设置 SWITCH_MODEL_BASE_URL${NC}" >&2
     usage
 fi
 

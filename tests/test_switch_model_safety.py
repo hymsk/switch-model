@@ -31,8 +31,10 @@ OPENCODE_SYNC_MODULE = load_opencode_sync_module()
 
 
 class SwitchModelSafetyTests(unittest.TestCase):
-    def test_generated_bundle_never_contains_personal_defaults_or_key_prefix_preview(self):
+    def test_generated_bundle_uses_default_url_file_without_personal_defaults(self):
         generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('DEFAULT_URL_FILENAME="default.url"', generated)
+        self.assertIn('DEFAULT_URL_FILE="$DEFAULT_SK_DIR/$DEFAULT_URL_FILENAME"', generated)
         self.assertIn('DEFAULT_API_URL="${SWITCH_MODEL_BASE_URL:-}"', generated)
         self.assertIn('DEFAULT_OPENCODE_PROVIDER="newapi"', generated)
         self.assertNotIn("${sk:0:10}", generated)
@@ -245,6 +247,98 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
 
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
         self.assertIn("context=258000", completed.stdout)
+
+    def test_generated_shell_uses_default_url_file(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, main = generated.partition("# === 07-main.sh ===")
+        self.assertTrue(marker, "generated script must retain the main-module boundary")
+
+        with tempfile.TemporaryDirectory() as directory:
+            default_url_file = Path(directory) / "default.url"
+            default_url_file.write_text("https://default.example.com\n", encoding="utf-8")
+            harness = Path(directory) / "invoke-switch-model.sh"
+            harness.write_text(
+                prefix
+                + '\nDEFAULT_URL_FILE="$TEST_DEFAULT_URL_FILE"\n'
+                + '\nopencode_main() { printf "url=%s\\n" "$1"; }\n'
+                + marker
+                + main,
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment["TEST_DEFAULT_URL_FILE"] = str(default_url_file)
+            completed = subprocess.run(
+                (bash, str(harness), "opencode"),
+                cwd=str(ROOT),
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        self.assertIn("url=https://default.example.com", completed.stdout)
+
+    def test_generated_shell_prioritizes_command_line_and_environment_urls(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, main = generated.partition("# === 07-main.sh ===")
+        self.assertTrue(marker, "generated script must retain the main-module boundary")
+
+        with tempfile.TemporaryDirectory() as directory:
+            default_url_file = Path(directory) / "default.url"
+            default_url_file.write_text("https://default.example.com\n", encoding="utf-8")
+            harness = Path(directory) / "invoke-switch-model.sh"
+            harness.write_text(
+                prefix
+                + '\nDEFAULT_URL_FILE="$TEST_DEFAULT_URL_FILE"\n'
+                + '\nopencode_main() { printf "url=%s\\n" "$1"; }\n'
+                + marker
+                + main,
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment.update(
+                SWITCH_MODEL_BASE_URL="https://environment.example.com",
+                TEST_DEFAULT_URL_FILE=str(default_url_file),
+            )
+            from_environment = subprocess.run(
+                (bash, str(harness), "opencode"),
+                cwd=str(ROOT),
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            from_command_line = subprocess.run(
+                (bash, str(harness), "opencode", "https://command.example.com"),
+                cwd=str(ROOT),
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+        self.assertEqual(0, from_environment.returncode, from_environment.stdout + from_environment.stderr)
+        self.assertIn("url=https://environment.example.com", from_environment.stdout)
+        self.assertEqual(0, from_command_line.returncode, from_command_line.stdout + from_command_line.stderr)
+        self.assertIn("url=https://command.example.com", from_command_line.stdout)
 
     def test_generated_shell_accepts_context_equals_form(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")

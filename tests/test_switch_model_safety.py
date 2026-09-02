@@ -41,6 +41,45 @@ class SwitchModelSafetyTests(unittest.TestCase):
         self.assertIn("--replace-providers", generated)
         self.assertIn("OPENCODE_REPLACE_PROVIDERS=false", generated)
 
+    def test_generated_shell_writes_api_key_protection_files_without_expanding_example(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, _ = generated.partition("# === 03-model-fetch.sh ===")
+        self.assertTrue(marker, "generated script must retain the model-fetch boundary")
+
+        with tempfile.TemporaryDirectory() as directory:
+            protection_directory = Path(directory) / "api-keys"
+            harness = Path(directory) / "write-api-key-protection.sh"
+            harness.write_text(
+                prefix
+                + '\nDEFAULT_SK_DIR="$TEST_PROTECTION_DIR"\n'
+                + "ensure_api_keys_protection\n",
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment["TEST_PROTECTION_DIR"] = str(protection_directory)
+            completed = subprocess.run(
+                (bash, str(harness)),
+                cwd=str(ROOT),
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            agents_content = (protection_directory / "AGENTS.md").read_text(encoding="utf-8")
+            claude_content = (protection_directory / "CLAUDE.md").read_text(encoding="utf-8")
+
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        expected_example = "`printf '%s\\n' '<api-key>' > ~/.config/api-keys/default.sk`"
+        self.assertIn(expected_example, agents_content)
+        self.assertEqual(agents_content, claude_content)
+
     def test_generated_opencode_helper_forwards_arguments(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
         if bash is None:

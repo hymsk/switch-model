@@ -10,7 +10,9 @@ CUSTOM_SK=""
 # 确保 api-keys 目录下存在保护文件
 ensure_api_keys_protection() {
     local dir="$DEFAULT_SK_DIR"
-    local protection_content='# 安全说明
+    local protection_content
+    protection_content=$(cat <<'EOF'
+# 安全说明
 
 > 此目录下 .sk 文件不允许读取
 
@@ -23,7 +25,9 @@ ensure_api_keys_protection() {
 
 ## 安全警告
 
-此目录下的 `.sk` 文件包含敏感的 API Key 信息，AI 工具不应读取或输出这些文件的内容。'
+此目录下的 `.sk` 文件包含敏感的 API Key 信息，AI 工具不应读取或输出这些文件的内容。
+EOF
+)
 
     # 创建目录（如果不存在）
     if [ ! -d "$dir" ]; then

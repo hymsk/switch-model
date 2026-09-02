@@ -36,6 +36,9 @@ except NameError:
     EMBEDDED_OPENCODE_MODELS_GZIP = ""
 
 EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
+MIN_COMPLETE_CATALOG_PROVIDERS = 10
+MIN_COMPLETE_CATALOG_ENTRIES = 100
+MIN_COMPLETE_CATALOG_LIMIT_RATIO = 0.5
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MODEL_BLOCK_RE = re.compile(r"(?m)^([^\s{}]+)\r?\n(?=\{)")
 PROVIDER_TYPE_NPM = {
@@ -91,21 +94,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def parse_contexts(value: str) -> Tuple[int, ...]:
-    raw_values = [item.strip() for item in str(value).split(",")]
-    if not raw_values or any(not item or not re.fullmatch(r"[0-9]+", item) for item in raw_values):
-        raise argparse.ArgumentTypeError("must be a comma-separated list of non-negative integers")
-
-    contexts: List[int] = []
-    seen: Set[int] = set()
-    for item in raw_values:
-        context = int(item)
-        if context not in seen:
-            seen.add(context)
-            contexts.append(context)
-    if 0 in seen and len(seen) > 1:
-        raise argparse.ArgumentTypeError("0 cannot be combined with other context values")
-    return tuple(contexts)
+def non_negative_int(value: str) -> int:
+    if not re.fullmatch(r"[0-9]+", str(value)):
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return int(value)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -217,14 +209,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--strict", action="store_true", help="Exit 2 if any model is unmatched or ambiguous")
     parser.add_argument("--write", action="store_true", help="Replace all providers in --config after creating a backup")
     parser.add_argument(
-        "--context",
-        type=parse_contexts,
-        default=(258000,),
-        metavar="TOKENS[,TOKENS...]",
-        help=(
-            "Generate one capped submode for each comma-separated total context-window limit below the model limit. "
-            "Use 0 to disable capped submodes (default: 258000)"
-        ),
+        "--context-threshold",
+        type=non_negative_int,
+        default=258000,
+        help="Context threshold in tokens. Models exceeding this will generate two versions: original and limited. 0 means no threshold (default: 258000)",
+    )
+    parser.add_argument(
+        "--context-limit",
+        type=non_negative_int,
+        default=0,
+        help="Total context-window limit for the capped version. 0 means use threshold value (default: 0 = same as threshold)",
     )
     return parser.parse_args(argv)
 
@@ -499,7 +493,31 @@ def load_embedded_opencode_models_catalog() -> List[CatalogEntry]:
         payload = json.loads(gzip.decompress(compressed).decode("utf-8"))
     except (ValueError, OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise SyncError(f"Failed to load embedded OpenCode model catalog: {error}") from error
-    return catalog_entries_from_opencode_models(payload)
+    entries = catalog_entries_from_opencode_models(payload)
+    validate_complete_catalog(entries, "embedded OpenCode model catalog")
+    return entries
+
+
+def validate_complete_catalog(entries: List[CatalogEntry], label: str) -> None:
+    """Reject fixtures and partial provider catalogs used as complete snapshots."""
+    provider_count = len({entry.provider_id for entry in entries})
+    limit_count = 0
+    for entry in entries:
+        limit = entry.data.get("limit")
+        if isinstance(limit, dict) and any(
+            isinstance(limit.get(key), int) and limit[key] > 0
+            for key in ("context", "input", "output")
+        ):
+            limit_count += 1
+    minimum_limits = int(len(entries) * MIN_COMPLETE_CATALOG_LIMIT_RATIO)
+    if provider_count < MIN_COMPLETE_CATALOG_PROVIDERS or len(entries) < MIN_COMPLETE_CATALOG_ENTRIES:
+        raise SyncError(
+            f"{label} is incomplete: {provider_count} providers, {len(entries)} models"
+        )
+    if limit_count < minimum_limits:
+        raise SyncError(
+            f"{label} lacks model limits: {limit_count}/{len(entries)} models include usable limits"
+        )
 
 
 def get_opencode_version(args: argparse.Namespace) -> str:
@@ -543,12 +561,31 @@ def atomic_write_private_json(path: Path, payload: Any) -> None:
                 pass
 
 
-def acquire_catalog(args: argparse.Namespace) -> Tuple[List[CatalogEntry], Dict[str, Any]]:
+def catalog_match_count(
+    model_ids: Iterable[str],
+    entries: List[CatalogEntry],
+    mappings: Optional[Dict[str, str]] = None,
+    prefix_fallback: bool = True,
+) -> int:
+    mappings = mappings or {}
+    return sum(
+        1
+        for model_id in model_ids
+        if select_entry(model_id, entries, mappings.get(model_id), prefix_fallback)[0] is not None
+    )
+
+
+def acquire_catalog(
+    args: argparse.Namespace,
+    expected_model_ids: Optional[Iterable[str]] = None,
+    mappings: Optional[Dict[str, str]] = None,
+) -> Tuple[List[CatalogEntry], Dict[str, Any]]:
     if args.catalog_file:
         entries = load_catalog_file(args.catalog_file)
         return entries, {"source": str(args.catalog_file), "opencode_version": "fixture"}
 
     version = get_opencode_version(args)
+    prefix_fallback = getattr(args, "prefix_fallback", True)
 
     def load_current() -> Tuple[List[CatalogEntry], Dict[str, Any]]:
         env = os.environ.copy()
@@ -588,19 +625,95 @@ def acquire_catalog(args: argparse.Namespace) -> Tuple[List[CatalogEntry], Dict[
             eprint("Warning: OpenCode catalog cache and embedded snapshot are unavailable; using current runtime catalog.")
             return current_entries, {**current_meta, "local_cache_error": str(local_error), "embedded_error": str(embedded_error)}
         else:
+            expected_ids = list(expected_model_ids or [])
+            if expected_ids and catalog_match_count(expected_ids, entries, mappings, prefix_fallback) == 0:
+                try:
+                    current_entries, current_meta = load_current()
+                except SyncError as current_error:
+                    eprint(
+                        "Warning: embedded catalog matched none of the requested models and runtime catalog was unavailable; "
+                        "continuing with the complete embedded snapshot."
+                    )
+                    return entries, {
+                        "source": "embedded-opencode-models",
+                        "opencode_version": version,
+                        "providers": len({entry.provider_id for entry in entries}),
+                        "local_cache_error": str(local_error),
+                        "runtime_error": str(current_error),
+                        "requested_model_matches": 0,
+                    }
+                current_matches = catalog_match_count(expected_ids, current_entries, mappings, prefix_fallback)
+                if current_matches > 0:
+                    eprint(
+                        "Warning: embedded catalog matched none of the requested models; using the current runtime catalog instead."
+                    )
+                    return current_entries, {
+                        **current_meta,
+                        "local_cache_error": str(local_error),
+                        "embedded_model_matches": 0,
+                        "requested_model_matches": current_matches,
+                    }
             eprint("Warning: OpenCode catalog cache unavailable; using embedded complete snapshot.")
             return entries, {
                 "source": "embedded-opencode-models",
                 "opencode_version": version,
                 "providers": len({entry.provider_id for entry in entries}),
                 "local_cache_error": str(local_error),
+                "requested_model_matches": catalog_match_count(expected_ids, entries, mappings, prefix_fallback) if expected_ids else None,
             }
     else:
+        expected_ids = list(expected_model_ids or [])
+        cache_matches = catalog_match_count(expected_ids, entries, mappings, prefix_fallback) if expected_ids else None
+        if expected_ids and cache_matches == 0:
+            embedded_entries: Optional[List[CatalogEntry]] = None
+            embedded_error: Optional[SyncError] = None
+            try:
+                embedded_entries = load_embedded_opencode_models_catalog()
+            except SyncError as error:
+                embedded_error = error
+            if embedded_entries is not None:
+                embedded_matches = catalog_match_count(expected_ids, embedded_entries, mappings, prefix_fallback)
+                if embedded_matches > 0:
+                    eprint(
+                        "Warning: local OpenCode catalog matched none of the requested models; using the embedded complete snapshot instead."
+                    )
+                    return embedded_entries, {
+                        "source": "embedded-opencode-models",
+                        "opencode_version": version,
+                        "cache": str(args.opencode_models_file.expanduser()),
+                        "cache_model_matches": 0,
+                        "requested_model_matches": embedded_matches,
+                        "providers": len({entry.provider_id for entry in embedded_entries}),
+                    }
+            try:
+                current_entries, current_meta = load_current()
+            except SyncError as current_error:
+                return entries, {
+                    "source": "opencode-models-cache",
+                    "opencode_version": version,
+                    "cache": str(args.opencode_models_file.expanduser()),
+                    "providers": len({entry.provider_id for entry in entries}),
+                    "requested_model_matches": 0,
+                    "embedded_error": str(embedded_error) if embedded_error else None,
+                    "runtime_error": str(current_error),
+                }
+            current_matches = catalog_match_count(expected_ids, current_entries, mappings, prefix_fallback)
+            if current_matches > 0:
+                eprint(
+                    "Warning: local OpenCode catalog matched none of the requested models; using the current runtime catalog instead."
+                )
+                return current_entries, {
+                    **current_meta,
+                    "cache": str(args.opencode_models_file.expanduser()),
+                    "cache_model_matches": 0,
+                    "requested_model_matches": current_matches,
+                }
         return entries, {
             "source": "opencode-models-cache",
             "opencode_version": version,
             "cache": str(args.opencode_models_file.expanduser()),
             "providers": len({entry.provider_id for entry in entries}),
+            "requested_model_matches": cache_matches,
         }
 
 
@@ -819,6 +932,31 @@ def select_entry(
     top = scored[0]
     tied = [item for item in scored if item[0] == top[0]]
     if len(tied) > 1:
+        # Regional/token-plan providers commonly expose identical model metadata.
+        # When every tied entry has the same model ID and semantic metadata,
+        # selecting the stable first entry is safe and avoids needless ambiguity.
+        fingerprints = {
+            json.dumps(
+                {
+                    "id": item[3].model_id.lower(),
+                    "limit": positive_limit(item[3].data.get("limit")),
+                    "capabilities": item[3].data.get("capabilities", {}),
+                    "variants": item[3].data.get("variants", {}),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            for item in tied
+        }
+        if len(fingerprints) == 1:
+            return top[3], {
+                "status": "matched",
+                "match_rule": f"{top[1]}-equivalent-metadata",
+                "score": top[0],
+                "effort_suffix": top[2],
+                "candidates": [item[3].full_id for item in tied[1:4]],
+                "warnings": ["equivalent metadata was available from multiple catalog providers; selected deterministically"],
+            }
         return None, {
             "status": "ambiguous",
             "match_rule": top[1],
@@ -848,14 +986,15 @@ def positive_limit(data: Any) -> Dict[str, int]:
 
 
 def apply_context_limit(limit: Dict[str, int], context_limit: int) -> Dict[str, int]:
-    """Cap the total context window without expanding or inventing other limits."""
+    """Cap the total context window without expanding any catalog limit."""
     if context_limit <= 0:
-        return limit
+        return dict(limit)
     result = dict(limit)
     result["context"] = min(result.get("context", context_limit), context_limit)
-    for key in ("input", "output"):
-        if key in result:
-            result[key] = min(result[key], context_limit)
+    if "input" in result:
+        result["input"] = min(result["input"], result["context"])
+    if "output" in result:
+        result["output"] = min(result["output"], result["context"])
     return result
 
 
@@ -870,9 +1009,10 @@ def model_config_from_entry(
     match: Dict[str, Any],
     variant_policy: str,
     provider_type: str = "openai-compatible",
-    contexts: Tuple[int, ...] = (258000,),
+    context_threshold: int = 258000,
+    context_limit: int = 0,
 ) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-    """Generate the original model plus each applicable capped context submode."""
+    """Generate the original model and one capped version when the threshold applies."""
     model_id = str(new_model["id"])
     name = model_id
     config: Dict[str, Any] = {"name": name}
@@ -918,22 +1058,23 @@ def model_config_from_entry(
     # Add original version
     results.append((model_id, config, report))
 
-    # Generate one capped version for each configured total window below the model limit.
     original_context = limit.get("context", 0)
-    for context_limit in contexts:
-        if context_limit <= 0 or original_context <= context_limit:
-            continue
-        capped_model_id = model_id + context_suffix(context_limit)
+    if context_threshold > 0 and original_context > context_threshold:
+        requested_limit = context_limit if context_limit > 0 else context_threshold
+        effective_limit = min(requested_limit, original_context)
+        if effective_limit >= original_context:
+            return results
+        capped_model_id = model_id + context_suffix(effective_limit)
         capped_config = copy.deepcopy(config)
         capped_config["name"] = capped_model_id  # 显示名称带后缀
         capped_config["id"] = model_id  # 保持原始模型 ID 用于 API 调用
-        capped_config["limit"] = apply_context_limit(limit, context_limit)
+        capped_config["limit"] = apply_context_limit(limit, effective_limit)
 
         capped_report = copy.deepcopy(report)
         capped_report["model_id"] = capped_model_id
         capped_report["capped_from"] = model_id
         capped_report["limit"] = capped_config["limit"]
-        capped_report["warnings"] = warnings + [f"context window capped from {original_context} to {context_limit}"]
+        capped_report["warnings"] = warnings + [f"context window capped from {original_context} to {effective_limit}"]
 
         results.append((capped_model_id, capped_config, capped_report))
 
@@ -1012,7 +1153,8 @@ def build_provider_fragment(
     reports: List[Dict[str, Any]] = []
     api_key_ref = get_api_key_reference(args)
 
-    contexts = args.context
+    context_threshold = args.context_threshold
+    context_limit = args.context_limit
 
     if args.provider_type != "auto-group":
         # Single-provider mode: openai-compatible / bailian / dashscope all produce one
@@ -1021,7 +1163,15 @@ def build_provider_fragment(
         for model in models:
             model_id = str(model["id"])
             entry, match = select_entry(model_id, entries, mappings.get(model_id), args.prefix_fallback)
-            results = model_config_from_entry(model, entry, match, args.variant_policy, args.provider_type, contexts)
+            results = model_config_from_entry(
+                model,
+                entry,
+                match,
+                args.variant_policy,
+                args.provider_type,
+                context_threshold,
+                context_limit,
+            )
             for mid, config, report in results:
                 generated[mid] = config
                 reports.append(report)
@@ -1051,7 +1201,15 @@ def build_provider_fragment(
         group_generated: Dict[str, Any] = {}
         for model, entry, match in group_models:
             model_id = str(model["id"])
-            results = model_config_from_entry(model, entry, match, args.variant_policy, "openai-compatible", contexts)
+            results = model_config_from_entry(
+                model,
+                entry,
+                match,
+                args.variant_policy,
+                "openai-compatible",
+                context_threshold,
+                context_limit,
+            )
             for mid, config, report in results:
                 group_generated[mid] = config
                 reports.append(report)
@@ -1282,7 +1440,8 @@ def make_report(
         "provider": args.provider,
         "provider_groups": provider_groups,
         "variant_policy": args.variant_policy,
-        "contexts": list(args.context),
+        "context_threshold": args.context_threshold,
+        "context_limit": args.context_limit if args.context_limit > 0 else args.context_threshold,
         "summary": counts,
         "models": model_reports,
     }
@@ -1315,8 +1474,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.new_api_key:
             eprint("Warning: --new-api-key is deprecated; migrate to --api-key-env before the next release.")
         base_url, model_source, models = resolve_model_source(args)
-        entries, catalog_meta = acquire_catalog(args)
         mappings = load_mapping(args.mapping_file)
+        entries, catalog_meta = acquire_catalog(
+            args,
+            (str(model["id"]) for model in models),
+            mappings,
+        )
         fragment, model_reports = build_provider_fragment(args, base_url, models, entries, mappings)
         report = make_report(args, model_source, len(models), catalog_meta, entries, model_reports)
         if args.output:

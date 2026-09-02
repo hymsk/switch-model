@@ -18,10 +18,10 @@ usage() {
     echo "  --preview               预览模式，只输出配置文件位置与内容，不实际写入"
     echo ""
     echo "OpenCode Options:"
-    echo "  --context <tokens[,tokens...]>  为超过指定值的模型生成上下文子模式（默认: $DEFAULT_CONTEXT；0 表示禁用）"
+    echo "  --context-threshold <tokens>    上下文阈值，超过此值生成双版本（默认: $DEFAULT_CONTEXT_THRESHOLD）"
+    echo "  --context-limit <tokens>        限制版本的总上下文窗口（默认: $DEFAULT_CONTEXT_LIMIT）"
     echo "  --mapping-file <path>            显式模型 ID 到 OpenCode catalog ID 的 JSON 映射（默认: $DEFAULT_OPENCODE_MAPPING_FILE）"
     echo "  --no-prefix-fallback             关闭仅在精确匹配失败后启用的安全前缀元数据回退"
-    echo "  --replace-providers              确认写入时替换 OpenCode 配置中的整个 provider 对象"
     echo "  Catalog 运行时顺序: 本地 cache -> 内嵌完整 snapshot -> 实时查询"
     echo "  实时查询命令: opencode models --verbose --pure"
     echo "  构建时使用受审计的 OPENCODE_MODELS_FILE；不会隐式刷新本机 cache"
@@ -37,42 +37,15 @@ usage() {
     echo ""
     echo "  # OpenCode 模式"
     echo "  $0 opencode https://api.example.com --preview"
-    echo "  $0 opencode https://api.example.com --replace-providers"
-    echo "  $0 opencode https://api.example.com --context 128000 --replace-providers"
-    echo "  $0 opencode https://api.example.com --mapping-file ~/.config/api-keys/model-mapping.json --replace-providers"
-    echo "  $0 opencode https://api.example.com --no-prefix-fallback --replace-providers"
+    echo "  $0 opencode https://api.example.com --context-threshold 128000 --context-limit 128000"
+    echo "  $0 opencode https://api.example.com --mapping-file ~/.config/api-keys/model-mapping.json"
+    echo "  $0 opencode https://api.example.com --no-prefix-fallback"
     echo ""
     echo "  # 预览模式"
     echo "  $0 claude https://api.example.com --preview"
     echo "  $0 codex https://api.example.com --preview"
     echo "  $0 opencode https://api.example.com --preview"
     exit "$exit_code"
-}
-
-validate_context_argument() {
-    local value="$1"
-    if ! [[ "$value" =~ ^[[:space:]]*[0-9]+[[:space:]]*(,[[:space:]]*[0-9]+[[:space:]]*)*$ ]]; then
-        echo -e "${RED}Error: --context must be a comma-separated list of non-negative integers${NC}" >&2
-        return 1
-    fi
-
-    local compact="${value//[[:space:]]/}"
-    local item
-    local has_zero=false
-    local has_positive=false
-    local -a values=()
-    IFS=',' read -ra values <<< "$compact"
-    for item in "${values[@]}"; do
-        if [[ "$item" =~ ^0+$ ]]; then
-            has_zero=true
-        else
-            has_positive=true
-        fi
-    done
-    if [ "$has_zero" = true ] && [ "$has_positive" = true ]; then
-        echo -e "${RED}Error: --context value 0 cannot be combined with other context values${NC}" >&2
-        return 1
-    fi
 }
 
 # ==================== 主逻辑 ====================
@@ -82,7 +55,6 @@ PREVIEW=false
 OPENCODE_MAPPING_FILE="$DEFAULT_OPENCODE_MAPPING_FILE"
 OPENCODE_MAPPING_FILE_EXPLICIT=false
 OPENCODE_PREFIX_FALLBACK=true
-OPENCODE_REPLACE_PROVIDERS=false
 
 # 检查是否有参数
 if [ "$#" -eq 0 ]; then
@@ -107,7 +79,8 @@ esac
 
 # 解析剩余选项：扫描所有参数，识别 --* 选项，其余作为位置参数保留
 POSITIONAL=()
-CONTEXT=$DEFAULT_CONTEXT
+CONTEXT_THRESHOLD=$DEFAULT_CONTEXT_THRESHOLD
+CONTEXT_LIMIT=$DEFAULT_CONTEXT_LIMIT
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help)
@@ -130,15 +103,20 @@ while [ "$#" -gt 0 ]; do
             SK_FILE="$2"
             shift 2
             ;;
-        --context)
-            if [ -z "${2:-}" ] || [[ "$2" == --* ]]; then
-                echo -e "${RED}Error: --context requires argument <tokens[,tokens...]>${NC}"
+        --context-threshold)
+            if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}Error: --context-threshold requires argument <tokens>${NC}"
                 usage
             fi
-            if ! validate_context_argument "$2"; then
+            CONTEXT_THRESHOLD="$2"
+            shift 2
+            ;;
+        --context-limit)
+            if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}Error: --context-limit requires argument <tokens>${NC}"
                 usage
             fi
-            CONTEXT="$2"
+            CONTEXT_LIMIT="$2"
             shift 2
             ;;
         --mapping-file)
@@ -152,10 +130,6 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-prefix-fallback)
             OPENCODE_PREFIX_FALLBACK=false
-            shift
-            ;;
-        --replace-providers)
-            OPENCODE_REPLACE_PROVIDERS=true
             shift
             ;;
         --preview)
@@ -200,6 +174,6 @@ case "$TOOL_MODE" in
         URL="${1:-$DEFAULT_API_URL}"
         PROVIDER="${2:-$DEFAULT_OPENCODE_PROVIDER}"
         PROVIDER_NAME="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-        opencode_main "$URL" "$PROVIDER" "$PROVIDER_NAME" "$CONTEXT"
+        opencode_main "$URL" "$PROVIDER" "$PROVIDER_NAME" "$CONTEXT_THRESHOLD" "$CONTEXT_LIMIT"
         ;;
 esac

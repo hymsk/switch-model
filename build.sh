@@ -7,16 +7,20 @@ OUTPUT="$SCRIPT_DIR/switch-model.sh"
 BUILD_OUTPUT="$(mktemp "$SCRIPT_DIR/.switch-model.sh.XXXXXX")"
 SHELL_DIR="$SCRIPT_DIR/shell"
 PYTHON_DIR="$SCRIPT_DIR/python"
-OPENCODE_MODELS_FILE="${OPENCODE_MODELS_FILE:-$SCRIPT_DIR/tests/fixtures/opencode-models.json}"
+OPENCODE_MODELS_FILE="${OPENCODE_MODELS_FILE:-}"
+CATALOG_TEMP=""
 
 cleanup_build_output() {
     rm -f "$BUILD_OUTPUT"
+    if [ -n "$CATALOG_TEMP" ]; then
+        rm -f "$CATALOG_TEMP"
+    fi
 }
 
 trap cleanup_build_output EXIT
 
 validate_opencode_models_file() {
-    python3 - "$1" >/dev/null <<'PYEOF'
+    python3 - "$1" <<'PYEOF'
 import json
 import sys
 from pathlib import Path
@@ -30,6 +34,8 @@ if not isinstance(providers, dict):
     raise SystemExit("catalog must be a provider object")
 
 entry_count = 0
+provider_count = 0
+limit_count = 0
 for provider_id, provider in providers.items():
     if not str(provider_id).strip():
         continue
@@ -38,6 +44,7 @@ for provider_id, provider in providers.items():
     models = provider.get("models")
     if not isinstance(models, dict):
         continue
+    provider_has_model = False
     for configured_id, raw_model in models.items():
         if not isinstance(raw_model, dict):
             continue
@@ -45,20 +52,90 @@ for provider_id, provider in providers.items():
         if not model_id:
             continue
         entry_count += 1
+        provider_has_model = True
+        limit = raw_model.get("limit")
+        if isinstance(limit, dict) and any(
+            isinstance(limit.get(key), int) and limit[key] > 0
+            for key in ("context", "input", "output")
+        ):
+            limit_count += 1
+    if provider_has_model:
+        provider_count += 1
 
-if entry_count == 0:
-    raise SystemExit("catalog contains no usable models")
+if provider_count < 10 or entry_count < 100:
+    raise SystemExit(
+        f"catalog is not a complete snapshot: {provider_count} providers, {entry_count} models"
+    )
+if limit_count * 2 < entry_count:
+    raise SystemExit(
+        f"catalog lacks model limits: {limit_count}/{entry_count} models include usable limits"
+    )
+print(f"{provider_count} providers, {entry_count} models, {limit_count} with limits")
 PYEOF
 }
 
 ensure_opencode_models_file() {
-    if [ -r "$OPENCODE_MODELS_FILE" ] && validate_opencode_models_file "$OPENCODE_MODELS_FILE"; then
-        echo "Using OpenCode catalog: $OPENCODE_MODELS_FILE"
+    if [ -n "$OPENCODE_MODELS_FILE" ]; then
+        if [ -r "$OPENCODE_MODELS_FILE" ]; then
+            local catalog_summary
+            if ! catalog_summary=$(validate_opencode_models_file "$OPENCODE_MODELS_FILE"); then
+                echo "Error: OpenCode catalog is incomplete or invalid: $OPENCODE_MODELS_FILE" >&2
+                return 1
+            fi
+            echo "Using OpenCode catalog: $OPENCODE_MODELS_FILE"
+            echo "Catalog summary: $catalog_summary"
+            return 0
+        fi
+
+        echo "Error: OpenCode catalog is missing or unreadable: $OPENCODE_MODELS_FILE" >&2
+        return 1
+    fi
+
+    CATALOG_TEMP="$(mktemp "$SCRIPT_DIR/.opencode-models.XXXXXX.json")"
+    # Default builds are anchored to Git HEAD. A dirty or locally generated
+    # bundle is never accepted as an implicit catalog source.
+    local catalog_source
+    local catalog_source_label="Git HEAD:switch-model.sh"
+    if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        && git -C "$SCRIPT_DIR" cat-file -e HEAD:switch-model.sh >/dev/null 2>&1; then
+        catalog_source="$(mktemp "$SCRIPT_DIR/.switch-model-reviewed.XXXXXX.sh")"
+        git -C "$SCRIPT_DIR" show HEAD:switch-model.sh > "$catalog_source"
+    else
+        echo "Error: no reviewed Git HEAD catalog is available for default reuse." >&2
+        echo "Set OPENCODE_MODELS_FILE to a reviewed complete catalog snapshot." >&2
+        return 1
+    fi
+
+    if ! python3 - "$catalog_source" "$CATALOG_TEMP" <<'PYEOF'
+import base64
+import gzip
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r"^EMBEDDED_OPENCODE_MODELS_GZIP = '([^']+)'$", text, re.MULTILINE)
+if not match or not match.group(1):
+    raise SystemExit("generated bundle has no embedded OpenCode catalog")
+Path(sys.argv[2]).write_bytes(gzip.decompress(base64.b64decode(match.group(1), validate=True)))
+PYEOF
+    then
+        rm -f "$catalog_source"
+        echo "Error: failed to extract the reviewed catalog from $catalog_source_label" >&2
+        return 1
+    fi
+    rm -f "$catalog_source"
+
+    OPENCODE_MODELS_FILE="$CATALOG_TEMP"
+    local catalog_summary
+    if catalog_summary=$(validate_opencode_models_file "$OPENCODE_MODELS_FILE"); then
+        echo "Using OpenCode catalog embedded in: $catalog_source_label"
+        echo "Catalog summary: $catalog_summary"
         return 0
     fi
 
-    echo "Error: OpenCode catalog is missing or invalid: $OPENCODE_MODELS_FILE" >&2
-    echo "Set OPENCODE_MODELS_FILE to a reviewed catalog snapshot before building." >&2
+    echo "Error: the catalog embedded in $OUTPUT is incomplete or invalid." >&2
+    echo "Set OPENCODE_MODELS_FILE to a reviewed complete catalog snapshot." >&2
     return 1
 }
 
@@ -85,6 +162,8 @@ if not isinstance(providers, dict):
     raise SystemExit("embedded OpenCode catalog must be a provider object")
 
 entry_count = 0
+provider_count = 0
+limit_count = 0
 for provider_id, provider in providers.items():
     if not str(provider_id).strip():
         continue
@@ -92,6 +171,7 @@ for provider_id, provider in providers.items():
         continue
     models = provider.get("models")
     if isinstance(models, dict):
+        provider_has_model = False
         for configured_id, raw_model in models.items():
             if not isinstance(raw_model, dict):
                 continue
@@ -99,8 +179,23 @@ for provider_id, provider in providers.items():
             if not model_id:
                 continue
             entry_count += 1
-if entry_count == 0:
-    raise SystemExit("embedded OpenCode catalog contains no usable models")
+            provider_has_model = True
+            limit = raw_model.get("limit")
+            if isinstance(limit, dict) and any(
+                isinstance(limit.get(key), int) and limit[key] > 0
+                for key in ("context", "input", "output")
+            ):
+                limit_count += 1
+        if provider_has_model:
+            provider_count += 1
+if provider_count < 10 or entry_count < 100:
+    raise SystemExit(
+        f"embedded OpenCode catalog is incomplete: {provider_count} providers, {entry_count} models"
+    )
+if limit_count * 2 < entry_count:
+    raise SystemExit(
+        f"embedded OpenCode catalog lacks model limits: {limit_count}/{entry_count}"
+    )
 PYEOF
 }
 
@@ -117,14 +212,26 @@ print("EMBEDDED_OPENCODE_MODELS_GZIP = " + repr(encoded))
 PYEOF
 }
 
+catalog_sha256() {
+    python3 - "$OPENCODE_MODELS_FILE" <<'PYEOF'
+import hashlib
+import sys
+from pathlib import Path
+
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PYEOF
+}
+
 echo "Building switch-model.sh..."
 ensure_opencode_models_file
+OPENCODE_MODELS_SHA256="$(catalog_sha256)"
 
 # 生成脚本头部
 cat > "$BUILD_OUTPUT" << 'HEADER'
 #!/bin/bash
 # Auto-generated file. Do not edit manually.
 # Run bash build.sh to regenerate.
+# OpenCode catalog SHA256: __OPENCODE_MODELS_SHA256__
 #
 # Switch Model - 模型切换脚本
 #
@@ -149,6 +256,17 @@ set -euo pipefail
 umask 077
 
 HEADER
+
+python3 - "$BUILD_OUTPUT" "$OPENCODE_MODELS_SHA256" <<'PYEOF'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.write_text(
+    path.read_text(encoding="utf-8").replace("__OPENCODE_MODELS_SHA256__", sys.argv[2], 1),
+    encoding="utf-8",
+)
+PYEOF
 
 # 嵌入 Python 脚本
 cat >> "$BUILD_OUTPUT" << 'PYTHON_SECTION'
@@ -201,6 +319,10 @@ validate_embedded_opencode_catalog "$BUILD_OUTPUT"
 
 chmod 755 "$BUILD_OUTPUT"
 mv -f "$BUILD_OUTPUT" "$OUTPUT"
+if [ -n "$CATALOG_TEMP" ]; then
+    rm -f "$CATALOG_TEMP"
+    CATALOG_TEMP=""
+fi
 trap - EXIT
 
 echo "Generated: $OUTPUT"

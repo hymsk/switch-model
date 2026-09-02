@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,10 +38,15 @@ class SwitchModelSafetyTests(unittest.TestCase):
         self.assertNotIn("${sk:0:10}", generated)
         self.assertIn('"<redacted>"', generated)
 
-    def test_generated_shell_requires_explicit_provider_replacement_for_opencode_write(self):
+    def test_default_build_is_anchored_to_git_head_not_dirty_bundle(self):
+        build = (ROOT / "build.sh").read_text(encoding="utf-8")
+        self.assertIn("git -C \"$SCRIPT_DIR\" show HEAD:switch-model.sh", build)
+        self.assertNotIn("grep -q '^# OpenCode catalog SHA256:", build)
+
+    def test_generated_shell_has_no_provider_replacement_gate(self):
         generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("--replace-providers", generated)
-        self.assertIn("OPENCODE_REPLACE_PROVIDERS=false", generated)
+        self.assertNotIn("--replace-providers", generated)
+        self.assertNotIn("OPENCODE_REPLACE_PROVIDERS", generated)
 
     def test_generated_shell_writes_api_key_protection_files_without_expanding_example(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
@@ -111,9 +118,9 @@ class SwitchModelSafetyTests(unittest.TestCase):
             completed.returncode,
             completed.stdout + completed.stderr,
         )
-        self.assertIn("--context TOKENS[,TOKENS...]", completed.stdout)
-        self.assertNotIn("--context-threshold", completed.stdout)
-        self.assertNotIn("--context-limit", completed.stdout)
+        self.assertIn("--context-threshold CONTEXT_THRESHOLD", completed.stdout)
+        self.assertIn("--context-limit CONTEXT_LIMIT", completed.stdout)
+        self.assertNotIn("--context TOKENS[,TOKENS...]", completed.stdout)
 
     def test_generated_preview_uses_python_fallback_when_python3_is_unavailable(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
@@ -200,7 +207,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
         self.assertIn("matched: 1, mapped: 2, guessed: 3, ambiguous: 4, unmatched: 5", completed.stdout)
 
-    def test_generated_shell_forwards_context_list(self):
+    def test_generated_shell_forwards_context_threshold_and_limit(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
         if bash is None:
             self.skipTest("bash is not available")
@@ -213,7 +220,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             harness = Path(directory) / "invoke-switch-model.sh"
             harness.write_text(
                 prefix
-                + '\nopencode_main() { printf "context=%s\\n" "$4"; }\n'
+                + '\nopencode_main() { printf "threshold=%s limit=%s\\n" "$4" "$5"; }\n'
                 + marker
                 + main,
                 encoding="utf-8",
@@ -224,8 +231,10 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                     str(harness),
                     "opencode",
                     "https://api.example.com",
-                    "--context",
-                    "128000,258000",
+                    "--context-threshold",
+                    "128000",
+                    "--context-limit",
+                    "64000",
                 ),
                 cwd=str(ROOT),
                 stdout=subprocess.PIPE,
@@ -237,9 +246,9 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             )
 
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
-        self.assertIn("context=128000,258000", completed.stdout)
+        self.assertIn("threshold=128000 limit=64000", completed.stdout)
 
-    def test_generated_shell_rejects_invalid_context_before_opencode_main(self):
+    def test_generated_shell_rejects_invalid_context_limits(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
         if bash is None:
             self.skipTest("bash is not available")
@@ -257,9 +266,9 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                 + main,
                 encoding="utf-8",
             )
-            for value in ("1,,2", "-1", "0,128000"):
+            for option, value in (("--context-threshold", "-1"), ("--context-limit", "12k")):
                 completed = subprocess.run(
-                    (bash, str(harness), "opencode", "--context", value),
+                    (bash, str(harness), "opencode", option, value),
                     cwd=str(ROOT),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -271,11 +280,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                 self.assertNotEqual(0, completed.returncode)
                 self.assertNotIn("opencode-main-called", completed.stdout)
 
-    def test_context_argument_accepts_multiple_deduplicated_values(self):
-        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128000, 258000,128000"])
-        self.assertEqual((128000, 258000), args.context)
-
-    def test_missing_cache_prefers_embedded_catalog_over_current_runtime_models(self):
+    def test_missing_cache_rejects_incomplete_embedded_catalog_and_uses_runtime(self):
         args = Namespace(
             catalog_file=None,
             catalog_mode="all",
@@ -290,6 +295,44 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                 {"id": "example-model", "providerID": "openai", "limit": {"context": 1000000}},
             )
         ]
+        runtime_output = "openai/runtime-model\n{\"id\":\"runtime-model\",\"providerID\":\"openai\",\"limit\":{\"context\":200000}}\n"
+
+        with patch.object(OPENCODE_SYNC_MODULE, "get_opencode_version", return_value="test"), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_opencode_models_catalog", side_effect=OPENCODE_SYNC_MODULE.SyncError("missing")), \
+             patch.object(OPENCODE_SYNC_MODULE, "catalog_entries_from_opencode_models", return_value=embedded_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "EMBEDDED_OPENCODE_MODELS_GZIP", "placeholder"), \
+             patch.object(OPENCODE_SYNC_MODULE, "base64") as base64_module, \
+             patch.object(OPENCODE_SYNC_MODULE, "gzip") as gzip_module, \
+             patch.object(OPENCODE_SYNC_MODULE, "run_command", return_value=runtime_output) as run_command:
+            base64_module.b64decode.return_value = b"compressed"
+            gzip_module.decompress.return_value = b"{}"
+            entries, metadata = OPENCODE_SYNC_MODULE.acquire_catalog(args)
+
+        self.assertEqual(["openai/runtime-model"], [entry.full_id for entry in entries])
+        self.assertEqual("opencode-current", metadata["source"])
+        self.assertIn("incomplete", metadata["embedded_error"])
+        run_command.assert_called_once()
+
+    def test_complete_embedded_catalog_remains_preferred_to_runtime(self):
+        args = Namespace(
+            catalog_file=None,
+            catalog_mode="all",
+            opencode_models_file=Path("/missing/models.json"),
+            api_key_env="NEWAPI_API_KEY",
+            opencode_bin="opencode",
+            command_timeout=20,
+        )
+        embedded_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                f"provider-{index % 10}/model-{index}",
+                {
+                    "id": f"model-{index}",
+                    "providerID": f"provider-{index % 10}",
+                    "limit": {"context": 200000},
+                },
+            )
+            for index in range(100)
+        ]
 
         with patch.object(OPENCODE_SYNC_MODULE, "get_opencode_version", return_value="test"), \
              patch.object(OPENCODE_SYNC_MODULE, "load_opencode_models_catalog", side_effect=OPENCODE_SYNC_MODULE.SyncError("missing")), \
@@ -301,11 +344,111 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
         self.assertEqual("embedded-opencode-models", metadata["source"])
         run_command.assert_not_called()
 
-    def test_context_argument_rejects_zero_mixed_with_submodes(self):
-        with self.assertRaises(OPENCODE_SYNC_MODULE.argparse.ArgumentTypeError):
-            OPENCODE_SYNC_MODULE.parse_contexts("0,128000")
+    def test_zero_embedded_matches_prefers_runtime_when_runtime_matches(self):
+        args = Namespace(
+            catalog_file=None,
+            catalog_mode="all",
+            opencode_models_file=Path("/missing/models.json"),
+            api_key_env="NEWAPI_API_KEY",
+            opencode_bin="opencode",
+            command_timeout=20,
+            prefix_fallback=True,
+        )
+        embedded_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                f"provider-{index % 10}/unrelated-{index}",
+                {
+                    "id": f"unrelated-{index}",
+                    "providerID": f"provider-{index % 10}",
+                    "limit": {"context": 200000},
+                },
+            )
+            for index in range(100)
+        ]
+        runtime_output = "openai/requested-model\n{\"id\":\"requested-model\",\"providerID\":\"openai\",\"limit\":{\"context\":400000}}\n"
 
-    def test_context_list_generates_multiple_submodes(self):
+        with patch.object(OPENCODE_SYNC_MODULE, "get_opencode_version", return_value="test"), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_opencode_models_catalog", side_effect=OPENCODE_SYNC_MODULE.SyncError("missing")), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_embedded_opencode_models_catalog", return_value=embedded_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "run_command", return_value=runtime_output) as run_command:
+            entries, metadata = OPENCODE_SYNC_MODULE.acquire_catalog(args, ["requested-model"])
+
+        self.assertEqual(["openai/requested-model"], [entry.full_id for entry in entries])
+        self.assertEqual("opencode-current", metadata["source"])
+        self.assertEqual(1, metadata["requested_model_matches"])
+        run_command.assert_called_once()
+
+    def test_zero_cache_matches_prefers_runtime_when_runtime_matches(self):
+        args = Namespace(
+            catalog_file=None,
+            catalog_mode="all",
+            opencode_models_file=Path("/models.json"),
+            api_key_env="NEWAPI_API_KEY",
+            opencode_bin="opencode",
+            command_timeout=20,
+            prefix_fallback=True,
+        )
+        cache_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                "openai/unrelated-model",
+                {"id": "unrelated-model", "providerID": "openai", "limit": {"context": 200000}},
+            )
+        ]
+        runtime_output = "openai/requested-model\n{\"id\":\"requested-model\",\"providerID\":\"openai\",\"limit\":{\"context\":400000}}\n"
+
+        with patch.object(OPENCODE_SYNC_MODULE, "get_opencode_version", return_value="test"), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_opencode_models_catalog", return_value=cache_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_embedded_opencode_models_catalog", side_effect=OPENCODE_SYNC_MODULE.SyncError("missing")), \
+             patch.object(OPENCODE_SYNC_MODULE, "run_command", return_value=runtime_output) as run_command:
+            entries, metadata = OPENCODE_SYNC_MODULE.acquire_catalog(args, ["requested-model"])
+
+        self.assertEqual(["openai/requested-model"], [entry.full_id for entry in entries])
+        self.assertEqual("opencode-current", metadata["source"])
+        self.assertEqual(1, metadata["requested_model_matches"])
+        run_command.assert_called_once()
+
+    def test_zero_cache_matches_prefers_matching_embedded_before_runtime(self):
+        args = Namespace(
+            catalog_file=None,
+            catalog_mode="all",
+            opencode_models_file=Path("/models.json"),
+            api_key_env="NEWAPI_API_KEY",
+            opencode_bin="opencode",
+            command_timeout=20,
+            prefix_fallback=True,
+        )
+        cache_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                "openai/unrelated-model",
+                {"id": "unrelated-model", "providerID": "openai", "limit": {"context": 200000}},
+            )
+        ]
+        embedded_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                "openai/requested-model",
+                {"id": "requested-model", "providerID": "openai", "limit": {"context": 400000}},
+            )
+        ]
+
+        with patch.object(OPENCODE_SYNC_MODULE, "get_opencode_version", return_value="test"), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_opencode_models_catalog", return_value=cache_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_embedded_opencode_models_catalog", return_value=embedded_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "run_command") as run_command:
+            entries, metadata = OPENCODE_SYNC_MODULE.acquire_catalog(args, ["requested-model"])
+
+        self.assertEqual(embedded_entries, entries)
+        self.assertEqual("embedded-opencode-models", metadata["source"])
+        self.assertEqual(1, metadata["requested_model_matches"])
+        run_command.assert_not_called()
+
+    def test_python_context_arguments_reject_negative_values(self):
+        with redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit):
+                OPENCODE_SYNC_MODULE.parse_args(["--context-threshold", "-1"])
+            with self.assertRaises(SystemExit):
+                OPENCODE_SYNC_MODULE.parse_args(["--context-limit", "-1"])
+
+    def test_context_threshold_generates_one_limited_version(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={
@@ -322,23 +465,20 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            contexts=(128000, 258000),
+            context_threshold=258000,
+            context_limit=128000,
         )
 
         self.assertEqual(
-            ["example-model", "example-model (128k)", "example-model (258k)"],
+            ["example-model", "example-model (128k)"],
             [model_id for model_id, _, _ in results],
         )
         self.assertEqual(
             {"context": 128000, "input": 128000, "output": 32000},
             results[1][1]["limit"],
         )
-        self.assertEqual(
-            {"context": 258000, "input": 258000, "output": 32000},
-            results[2][1]["limit"],
-        )
 
-    def test_context_zero_disables_submodes(self):
+    def test_context_threshold_zero_disables_limited_version(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={"limit": {"context": 1000000, "input": 900000, "output": 32000}},
@@ -350,7 +490,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            contexts=(0,),
+            context_threshold=0,
         )
 
         self.assertEqual(["example-model"], [model_id for model_id, _, _ in results])
@@ -367,13 +507,32 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            contexts=(190000,),
+            context_threshold=190000,
+            context_limit=190000,
         )
 
         self.assertEqual(["example-model", "example-model (190k)"], [model_id for model_id, _, _ in results])
         self.assertEqual({"context": 190000, "output": 32000}, results[1][1]["limit"])
 
-    def test_context_submode_never_expands_original_limits(self):
+    def test_context_threshold_uses_total_context_even_when_input_is_smaller(self):
+        entry = OPENCODE_SYNC_MODULE.CatalogEntry(
+            full_id="openai/example-model",
+            data={"limit": {"context": 400000, "input": 200000, "output": 128000}},
+        )
+        match = {"status": "matched", "match_rule": "exact", "score": 100, "candidates": []}
+
+        results = OPENCODE_SYNC_MODULE.model_config_from_entry(
+            {"id": "example-model"},
+            entry,
+            match,
+            "none",
+            context_threshold=258000,
+            context_limit=258000,
+        )
+
+        self.assertEqual(["example-model", "example-model (258k)"], [model_id for model_id, _, _ in results])
+
+    def test_context_limit_never_expands_original_limits(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={"limit": {"context": 400000, "input": 272000, "output": 272000}},
@@ -385,7 +544,8 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            contexts=(258000,),
+            context_threshold=258000,
+            context_limit=258000,
         )
 
         self.assertEqual(
@@ -393,23 +553,36 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             results[1][1]["limit"],
         )
 
-    def test_report_summary_does_not_count_context_submodes_as_models(self):
+    def test_context_limit_above_original_does_not_create_duplicate_version(self):
+        entry = OPENCODE_SYNC_MODULE.CatalogEntry(
+            full_id="openai/example-model",
+            data={"limit": {"context": 512000, "input": 400000, "output": 64000}},
+        )
+        match = {"status": "matched", "match_rule": "exact", "score": 100, "candidates": []}
+
+        results = OPENCODE_SYNC_MODULE.model_config_from_entry(
+            {"id": "example-model"},
+            entry,
+            match,
+            "none",
+            context_threshold=258000,
+            context_limit=1000000,
+        )
+
+        self.assertEqual(["example-model"], [model_id for model_id, _, _ in results])
+
+    def test_report_summary_does_not_count_limited_version_as_model(self):
         args = Namespace(
             api_key_env="NEWAPI_API_KEY",
             provider="newapi",
             variant_policy="none",
-            context=(128000, 258000),
+            context_threshold=258000,
+            context_limit=128000,
         )
         model_reports = [
             {"model_id": "example-model", "status": "matched", "source_model": "openai/example-model"},
             {
                 "model_id": "example-model (128k)",
-                "status": "matched",
-                "source_model": "openai/example-model",
-                "capped_from": "example-model",
-            },
-            {
-                "model_id": "example-model (258k)",
                 "status": "matched",
                 "source_model": "openai/example-model",
                 "capped_from": "example-model",
@@ -427,7 +600,9 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
 
         self.assertEqual(1, report["summary"]["matched"])
         self.assertEqual({"openai": 1}, report["provider_groups"])
-        self.assertEqual([128000, 258000], report["contexts"])
+        self.assertNotIn("contexts", report)
+        self.assertEqual(258000, report["context_threshold"])
+        self.assertEqual(128000, report["context_limit"])
 
 if __name__ == "__main__":
     unittest.main()

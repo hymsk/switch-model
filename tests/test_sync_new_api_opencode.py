@@ -78,7 +78,7 @@ class PrefixFallbackTest(unittest.TestCase):
         self.assertEqual(2, match["prefix_segments"])
 
         generated = MODULE.model_config_from_entry(
-            {"id": "glm-5.3-flash-local"}, entry, match, "translate", contexts=(258000,)
+            {"id": "glm-5.3-flash-local"}, entry, match, "translate", context_threshold=258000
         )
         original_id, original_config, _ = generated[0]
         capped_id, capped_config, capped_report = generated[1]
@@ -89,6 +89,7 @@ class PrefixFallbackTest(unittest.TestCase):
         self.assertEqual("glm-5.3-flash-local (258k)", capped_id)
         self.assertEqual("glm-5.3-flash-local", capped_config["id"])
         self.assertEqual(258000, capped_config["limit"]["context"])
+        self.assertNotIn("input", capped_config["limit"])
         self.assertEqual("guessed", capped_report["status"])
 
     def test_custom_glm_suffix_prefers_official_provider_over_metadata(self):
@@ -131,6 +132,28 @@ class PrefixFallbackTest(unittest.TestCase):
         self.assertEqual(self.glm52, entry)
         self.assertEqual("mapped", match["status"])
 
+    def test_equivalent_provider_duplicates_are_selected_deterministically(self):
+        metadata = {
+            "id": "mimo-v2.5",
+            "limit": {"context": 262144, "output": 32768},
+            "capabilities": {"reasoning": True, "toolcall": True},
+            "variants": {"high": {"reasoningEffort": "high"}},
+        }
+        entries = [
+            MODULE.CatalogEntry(
+                f"xiaomi-token-plan-{region}/mimo-v2.5",
+                {**metadata, "providerID": f"xiaomi-token-plan-{region}"},
+            )
+            for region in ("ams", "cn", "sgp")
+        ]
+
+        entry, match = MODULE.select_entry("Mimo/mimo-v2.5", entries, None)
+
+        self.assertIsNotNone(entry)
+        self.assertEqual("matched", match["status"])
+        self.assertEqual("provider-prefix-stripped-equivalent-metadata", match["match_rule"])
+        self.assertEqual("xiaomi-token-plan-ams/mimo-v2.5", entry.full_id)
+
     def test_fallback_does_not_cross_major_version(self):
         entry, match = MODULE.select_entry("glm-4.9-flash-local", self.entries, None)
 
@@ -150,7 +173,7 @@ class PrefixFallbackTest(unittest.TestCase):
     def test_report_counts_guessed_models(self):
         entry, match = MODULE.select_entry("glm-5.3-flash-local", self.entries, None)
         _, _, report = MODULE.model_config_from_entry(
-            {"id": "glm-5.3-flash-local"}, entry, match, "translate", contexts=(0,)
+            {"id": "glm-5.3-flash-local"}, entry, match, "translate", context_threshold=0
         )[0]
         args = MODULE.parse_args([
             "--base-url", "https://new-api.example.com",

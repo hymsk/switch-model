@@ -9,7 +9,7 @@ build.sh             # 从源码生成 switch-model.sh
 shell/               # Bash 模块
 python/              # 内嵌 Python 模块
 switch-model.sh      # 生成的单文件 CLI
-tests/               # 离线测试与固定 catalog fixture
+tests/               # 离线测试与最小 catalog fixture
 ```
 
 ## 要求
@@ -62,14 +62,15 @@ OpenCode：
 # Preview 不修改 Host 配置，也不写持久报告。
 bash switch-model.sh opencode https://api.example.com --preview
 
-# 写入会替换 opencode.json 中的整个 provider 对象，必须显式确认。
-bash switch-model.sh opencode https://api.example.com --replace-providers
+# 写入会先创建备份，再替换 opencode.json 中的整个 provider 对象。
+bash switch-model.sh opencode https://api.example.com
 ```
 
 OpenCode 还支持：
 
 ```text
---context <tokens[,tokens...]>
+--context-threshold <tokens>
+--context-limit <tokens>
 --mapping-file <path>
 --no-prefix-fallback
 ```
@@ -87,13 +88,13 @@ OpenCode 还支持：
 
 ## 构建
 
-默认使用仓库内测试 catalog，确保构建可复现且不读取开发机 cache：
+默认只复用 Git `HEAD:switch-model.sh` 中已审计的完整 catalog；不会信任工作区中的 dirty 生成物，也不会读取开发机 cache：
 
 ```bash
 bash build.sh
 ```
 
-正式构建可显式指定已审计的 OpenCode catalog：
+首次构建、更新 catalog，或 Git `HEAD` 中仍是旧的不完整快照时，必须显式指定已审计的完整 OpenCode catalog。构建会拒绝只含少量 provider/model 或普遍缺少 `limit` 的 fixture/部分目录：
 
 ```bash
 OPENCODE_MODELS_FILE=/path/to/reviewed-models.json bash build.sh

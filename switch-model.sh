@@ -2404,13 +2404,24 @@ preview_opencode_config() {
         # 显示匹配报告摘要
         if [ -f "$report_file" ]; then
             local summary
-            summary=$(python3 -c "
-import json, sys
-with open('$report_file') as f:
-    report = json.load(f)
-summary = report.get('summary', {})
-print(f\"matched: {summary.get('matched', 0)}, mapped: {summary.get('mapped', 0)}, guessed: {summary.get('guessed', 0)}, ambiguous: {summary.get('ambiguous', 0)}, unmatched: {summary.get('unmatched', 0)}\")
-" 2>/dev/null)
+            local python_cmd
+            python_cmd=$(get_python_cmd)
+            summary=$("$python_cmd" - "$report_file" 2>/dev/null <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as file:
+    report = json.load(file)
+summary = report.get("summary", {})
+print(
+    f"matched: {summary.get('matched', 0)}, "
+    f"mapped: {summary.get('mapped', 0)}, "
+    f"guessed: {summary.get('guessed', 0)}, "
+    f"ambiguous: {summary.get('ambiguous', 0)}, "
+    f"unmatched: {summary.get('unmatched', 0)}"
+)
+PYEOF
+)
             echo -e "${YELLOW}匹配结果:${NC} $summary"
         fi
     else

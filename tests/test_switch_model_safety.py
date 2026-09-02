@@ -1,5 +1,6 @@
 import importlib.util
 from argparse import Namespace
+import os
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,91 @@ class SwitchModelSafetyTests(unittest.TestCase):
         self.assertIn("--context TOKENS[,TOKENS...]", completed.stdout)
         self.assertNotIn("--context-threshold", completed.stdout)
         self.assertNotIn("--context-limit", completed.stdout)
+
+    def test_generated_preview_uses_python_fallback_when_python3_is_unavailable(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, _ = generated.partition("# === 07-main.sh ===")
+        self.assertTrue(marker, "generated script must retain the main-module boundary")
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            key_file = temporary / "test.sk"
+            key_file.write_text("test-key-not-real\n", encoding="utf-8")
+            harness = temporary / "preview-with-python-fallback.sh"
+            harness.write_text(
+                prefix
+                + r'''
+python3() {
+    return 127
+}
+
+python() {
+    "$REAL_PYTHON" "$@"
+}
+
+command() {
+    if [ "${1:-}" = "-v" ] && [ "${2:-}" = "python3" ]; then
+        return 1
+    fi
+    if [ "${1:-}" = "-v" ] && [ "${2:-}" = "python" ]; then
+        printf '%s\n' python
+        return 0
+    fi
+    builtin command "$@"
+}
+
+run_opencode_sync() {
+    local output_file=""
+    local report_file_path=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --output)
+                output_file="$2"
+                shift 2
+                ;;
+            --report)
+                report_file_path="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    printf '%s\n' '{"provider": {}}' > "$output_file"
+    printf '%s\n' '{"summary": {"matched": 1, "mapped": 2, "guessed": 3, "ambiguous": 4, "unmatched": 5}}' > "$report_file_path"
+}
+
+SK_FILE="$TEST_KEY_FILE"
+OPENCODE_CONFIG="$TEST_CONFIG_FILE"
+preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
+''',
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment.update(
+                REAL_PYTHON=sys.executable,
+                TEST_KEY_FILE=str(key_file),
+                TEST_CONFIG_FILE=str(temporary / "opencode.json"),
+            )
+            completed = subprocess.run(
+                (bash, str(harness)),
+                cwd=str(ROOT),
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        self.assertIn("matched: 1, mapped: 2, guessed: 3, ambiguous: 4, unmatched: 5", completed.stdout)
 
     def test_generated_shell_forwards_context_list(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")

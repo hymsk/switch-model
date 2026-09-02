@@ -17,6 +17,16 @@ fi
 
 # 获取可用的 Python 3 命令名
 get_python_cmd() {
+    local candidate
+
+    if command -v uv >/dev/null 2>&1; then
+        candidate=$(uv python find 2>/dev/null | tr -d '\r')
+        if [ -n "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+
     if command -v python3 &>/dev/null; then
         echo "python3"
     elif command -v python &>/dev/null && python -c "import sys; raise SystemExit(0 if sys.version_info[0] >= 3 else 1)" 2>/dev/null; then
@@ -31,7 +41,7 @@ check_json_tool() {
         echo -e "${RED}错误: 未找到 Python 3${NC}" >&2
         return 1
     fi
-    $python_cmd -c "import json; import sys" 2>/dev/null || {
+    "$python_cmd" -c "import json; import sys" 2>/dev/null || {
         echo -e "${RED}错误: 无法找到可用的 Python 3 与 json 模块${NC}" >&2
         return 1
     }

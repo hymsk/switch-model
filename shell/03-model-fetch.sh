@@ -46,7 +46,7 @@ fetch_models() {
 
     # 使用 python 解析 JSON 提取模型 ID 列表
     local python_cmd=$(get_python_cmd)
-    echo "$response" | $python_cmd -c "
+    echo "$response" | "$python_cmd" -c "
 import json, sys
 try:
     data = json.load(sys.stdin)

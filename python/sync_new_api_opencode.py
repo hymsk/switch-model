@@ -98,49 +98,16 @@ def parse_context_token(value: str) -> int:
     token = str(value).strip()
     if re.fullmatch(r"[0-9]+[kK]", token):
         return int(token[:-1]) * 1000
-    if re.fullmatch(r"[0-9]{1,3},[0-9]{3}", token):
-        return int(token.replace(",", ""))
     if re.fullmatch(r"[0-9]+", token):
         return int(token)
-    raise argparse.ArgumentTypeError(
-        "must use token counts such as 200000, 200,000, or 200k"
-    )
+    raise argparse.ArgumentTypeError("must use a token count such as 258000 or 258k")
 
 
 def parse_contexts(value: str) -> Tuple[int, ...]:
     text = str(value).strip()
     if not text:
         raise argparse.ArgumentTypeError("must contain at least one context value")
-
-    contexts: List[int] = []
-    seen: Set[int] = set()
-    position = 0
-    token_pattern = re.compile(r"(?:[0-9]+[kK]|[0-9]{1,3},[0-9]{3}|[0-9]+)")
-    while position < len(text):
-        match = token_pattern.match(text, position)
-        if not match:
-            raise argparse.ArgumentTypeError(
-                "must use token counts such as 200000, 200,000, or 200k"
-            )
-        context = parse_context_token(match.group(0))
-        if context not in seen:
-            seen.add(context)
-            contexts.append(context)
-        position = match.end()
-        while position < len(text) and text[position].isspace():
-            position += 1
-        if position == len(text):
-            break
-        if text[position] != ",":
-            raise argparse.ArgumentTypeError("context values must be comma-separated")
-        position += 1
-        while position < len(text) and text[position].isspace():
-            position += 1
-        if position == len(text):
-            raise argparse.ArgumentTypeError("context list cannot end with a separator")
-    if 0 in seen and len(seen) > 1:
-        raise argparse.ArgumentTypeError("0 cannot be combined with other context values")
-    return tuple(contexts)
+    return (parse_context_token(text),)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -256,10 +223,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--context",
         type=parse_contexts,
         default=(258000,),
-        metavar="TOKENS[,TOKENS...]",
+        metavar="TOKENS",
         help=(
-            "Generate one capped submode per total context-window limit (examples: 200000, 200,000, 200k). "
-            "Separate multiple grouped values with comma-space. "
+            "Generate a capped submode for the total context-window limit (examples: 258000, 258k, 258K). "
             "Use 0 to disable capped submodes (default: 258000)"
         ),
     )

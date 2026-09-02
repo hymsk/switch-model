@@ -69,12 +69,12 @@ bash switch-model.sh opencode https://api.example.com
 OpenCode 还支持：
 
 ```text
---context <tokens[,tokens...]>
+--context <tokens>
 --mapping-file <path>
 --no-prefix-fallback
 ```
 
-`--context` 支持 `200000`、`200,000`、`200k` 三种等价格式。多值可使用 `128k,258k`；带千位分隔符的多值建议使用引号和逗号空格，例如 `"128,000, 258,000"`。千位格式的单值使用一个分隔逗号；百万级以上请使用 `1000000` 或 `1000k`，避免与多值分隔符混淆。`0` 表示不生成上下文子模式。
+`--context` 仅接受单个上下文长度：`258000`、`258k` 或 `258K`。不支持逗号分隔、千位分隔或多个值。`0` 表示不生成上下文子模式。
 
 ## 配置影响
 

@@ -350,49 +350,16 @@ def parse_context_token(value: str) -> int:
     token = str(value).strip()
     if re.fullmatch(r"[0-9]+[kK]", token):
         return int(token[:-1]) * 1000
-    if re.fullmatch(r"[0-9]{1,3},[0-9]{3}", token):
-        return int(token.replace(",", ""))
     if re.fullmatch(r"[0-9]+", token):
         return int(token)
-    raise argparse.ArgumentTypeError(
-        "must use token counts such as 200000, 200,000, or 200k"
-    )
+    raise argparse.ArgumentTypeError("must use a token count such as 258000 or 258k")
 
 
 def parse_contexts(value: str) -> Tuple[int, ...]:
     text = str(value).strip()
     if not text:
         raise argparse.ArgumentTypeError("must contain at least one context value")
-
-    contexts: List[int] = []
-    seen: Set[int] = set()
-    position = 0
-    token_pattern = re.compile(r"(?:[0-9]+[kK]|[0-9]{1,3},[0-9]{3}|[0-9]+)")
-    while position < len(text):
-        match = token_pattern.match(text, position)
-        if not match:
-            raise argparse.ArgumentTypeError(
-                "must use token counts such as 200000, 200,000, or 200k"
-            )
-        context = parse_context_token(match.group(0))
-        if context not in seen:
-            seen.add(context)
-            contexts.append(context)
-        position = match.end()
-        while position < len(text) and text[position].isspace():
-            position += 1
-        if position == len(text):
-            break
-        if text[position] != ",":
-            raise argparse.ArgumentTypeError("context values must be comma-separated")
-        position += 1
-        while position < len(text) and text[position].isspace():
-            position += 1
-        if position == len(text):
-            raise argparse.ArgumentTypeError("context list cannot end with a separator")
-    if 0 in seen and len(seen) > 1:
-        raise argparse.ArgumentTypeError("0 cannot be combined with other context values")
-    return tuple(contexts)
+    return (parse_context_token(text),)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -508,10 +475,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--context",
         type=parse_contexts,
         default=(258000,),
-        metavar="TOKENS[,TOKENS...]",
+        metavar="TOKENS",
         help=(
-            "Generate one capped submode per total context-window limit (examples: 200000, 200,000, 200k). "
-            "Separate multiple grouped values with comma-space. "
+            "Generate a capped submode for the total context-window limit (examples: 258000, 258k, 258K). "
             "Use 0 to disable capped submodes (default: 258000)"
         ),
     )
@@ -2708,7 +2674,7 @@ usage() {
     echo "  --preview               预览模式，只输出配置文件位置与内容，不实际写入"
     echo ""
     echo "OpenCode Options:"
-    echo "  --context <tokens[,tokens...]>  上下文子模式，支持 200000 / 200,000 / 200k（默认: $DEFAULT_CONTEXT；0 表示禁用）"
+    echo "  --context <tokens>              上下文子模式，仅支持 258000 / 258k / 258K（默认: $DEFAULT_CONTEXT；0 表示禁用）"
     echo "  --mapping-file <path>            显式模型 ID 到 OpenCode catalog ID 的 JSON 映射（默认: $DEFAULT_OPENCODE_MAPPING_FILE）"
     echo "  --no-prefix-fallback             关闭仅在精确匹配失败后启用的安全前缀元数据回退"
     echo "  Catalog 运行时顺序: 本地 cache -> 内嵌完整 snapshot -> 实时查询"
@@ -2726,8 +2692,7 @@ usage() {
     echo ""
     echo "  # OpenCode 模式"
     echo "  $0 opencode https://api.example.com --preview"
-    echo "  $0 opencode https://api.example.com --context 128k,258k"
-    echo "  $0 opencode https://api.example.com --context \"128,000, 258,000\""
+    echo "  $0 opencode https://api.example.com --context 258k"
     echo "  $0 opencode https://api.example.com --mapping-file ~/.config/api-keys/model-mapping.json"
     echo "  $0 opencode https://api.example.com --no-prefix-fallback"
     echo ""
@@ -2757,46 +2722,17 @@ def fail(message):
     raise SystemExit(1)
 
 
-text = sys.argv[1].strip()
-if not text:
+token = sys.argv[1].strip()
+if not token:
     fail("must contain at least one value")
 
-contexts = []
-seen = set()
-position = 0
-token_pattern = re.compile(r"(?:[0-9]+[kK]|[0-9]{1,3},[0-9]{3}|[0-9]+)")
-while position < len(text):
-    match = token_pattern.match(text, position)
-    if not match:
-        fail("supports values such as 200000, 200,000, or 200k")
-    token = match.group(0)
-    if re.fullmatch(r"[0-9]+[kK]", token):
-        context = int(token[:-1]) * 1000
-    elif re.fullmatch(r"[0-9]{1,3},[0-9]{3}", token):
-        context = int(token.replace(",", ""))
-    elif re.fullmatch(r"[0-9]+", token):
-        context = int(token)
-    else:
-        fail("supports values such as 200000, 200,000, or 200k")
-    if context not in seen:
-        seen.add(context)
-        contexts.append(context)
-    position = match.end()
-    while position < len(text) and text[position].isspace():
-        position += 1
-    if position == len(text):
-        break
-    if text[position] != ",":
-        fail("values must be comma-separated")
-    position += 1
-    while position < len(text) and text[position].isspace():
-        position += 1
-    if position == len(text):
-        fail("list cannot end with a separator")
-
-if 0 in seen and len(seen) > 1:
-    fail("value 0 cannot be combined with other values")
-print(",".join(str(context) for context in contexts))
+if re.fullmatch(r"[0-9]+[kK]", token):
+    context = int(token[:-1]) * 1000
+elif re.fullmatch(r"[0-9]+", token):
+    context = int(token)
+else:
+    fail("only supports values such as 258000, 258k, or 258K")
+print(context)
 PYEOF
 }
 
@@ -2856,7 +2792,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --context)
             if [ -z "${2:-}" ] || [[ "$2" == --* ]]; then
-                echo -e "${RED}Error: --context requires argument <tokens[,tokens...]>${NC}"
+                echo -e "${RED}Error: --context requires argument <tokens>${NC}"
                 usage
             fi
             CONTEXT=$(normalize_context_argument "$2") || usage
@@ -2864,7 +2800,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --context=*)
             if [ -z "${1#--context=}" ]; then
-                echo -e "${RED}Error: --context requires argument <tokens[,tokens...]>${NC}"
+                echo -e "${RED}Error: --context requires argument <tokens>${NC}"
                 usage
             fi
             CONTEXT=$(normalize_context_argument "${1#--context=}") || usage

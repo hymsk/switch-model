@@ -4,7 +4,7 @@
 
 - 拒绝将测试 fixture 或不完整模型目录作为正式内嵌 catalog。
 - 本地 cache 缺失且内嵌 catalog 不完整时，恢复到 `opencode models --verbose --pure` 回退。
-- `--context` 支持整数、千位分隔符和 `k` 后缀，并按总 `limit.context` 生成不扩大 catalog limit 的子模式。
+- `--context` 仅支持单个纯数字或 `k`/`K` 后缀的上下文长度，并按总 `limit.context` 生成不扩大 catalog limit 的子模式。
 - 保留 Python 3 fallback，并移除 OpenCode provider 替换确认门槛。
 
 ## 0.1.0rc1

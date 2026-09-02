@@ -118,7 +118,7 @@ class SwitchModelSafetyTests(unittest.TestCase):
             completed.returncode,
             completed.stdout + completed.stderr,
         )
-        self.assertIn("--context TOKENS[,TOKENS...]", completed.stdout)
+        self.assertIn("--context TOKENS", completed.stdout)
         self.assertNotIn("--context-threshold", completed.stdout)
         self.assertNotIn("--context-limit", completed.stdout)
 
@@ -207,7 +207,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
         self.assertIn("matched: 1, mapped: 2, guessed: 3, ambiguous: 4, unmatched: 5", completed.stdout)
 
-    def test_generated_shell_normalizes_and_forwards_context_list(self):
+    def test_generated_shell_normalizes_and_forwards_context(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
         if bash is None:
             self.skipTest("bash is not available")
@@ -232,7 +232,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                     "opencode",
                     "https://api.example.com",
                     "--context",
-                    "128k, 258,000,128000",
+                    "258K",
                 ),
                 cwd=str(ROOT),
                 stdout=subprocess.PIPE,
@@ -244,7 +244,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             )
 
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
-        self.assertIn("context=128000,258000", completed.stdout)
+        self.assertIn("context=258000", completed.stdout)
 
     def test_generated_shell_accepts_context_equals_form(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
@@ -296,7 +296,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                 + main,
                 encoding="utf-8",
             )
-            for value in ("1,,2", "-1", "0,128000", "128x", "200kk"):
+            for value in ("1,,2", "128k,258k", "258,000", "-1", "128x", "200kk"):
                 completed = subprocess.run(
                     (bash, str(harness), "opencode", "--context", value),
                     cwd=str(ROOT),
@@ -503,26 +503,10 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
         self.assertEqual(1, metadata["requested_model_matches"])
         run_command.assert_not_called()
 
-    def test_context_argument_accepts_multiple_deduplicated_values(self):
-        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128k, 258,000,128000"])
-        self.assertEqual((128000, 258000), args.context)
-
-    def test_context_argument_accepts_plain_grouped_and_k_formats(self):
-        for value in ("200000", "200,000", "200k", "200K"):
+    def test_context_argument_accepts_plain_and_k_formats(self):
+        for value in ("258000", "258k", "258K"):
             args = OPENCODE_SYNC_MODULE.parse_args(["--context", value])
-            self.assertEqual((200000,), args.context)
-
-    def test_context_argument_accepts_multiple_grouped_values_with_comma_space(self):
-        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128,000, 258,000"])
-        self.assertEqual((128000, 258000), args.context)
-
-    def test_context_argument_accepts_k_and_grouped_values_without_space(self):
-        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128k,258,000"])
-        self.assertEqual((128000, 258000), args.context)
-
-    def test_context_argument_treats_adjacent_grouped_values_as_a_list(self):
-        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128,000,258,000"])
-        self.assertEqual((128000, 258000), args.context)
+            self.assertEqual((258000,), args.context)
 
     def test_context_argument_accepts_equals_form_and_rejects_abbreviation(self):
         args = OPENCODE_SYNC_MODULE.parse_args(["--context=200k"])
@@ -531,16 +515,12 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             with self.assertRaises(SystemExit):
                 OPENCODE_SYNC_MODULE.parse_args(["--conte", "200k"])
 
-    def test_context_argument_rejects_invalid_or_ambiguous_values(self):
-        for value in ("", "1,,2", "-1", "128x", "200kk", "1,000,000"):
+    def test_context_argument_rejects_commas_and_invalid_values(self):
+        for value in ("", "1,,2", "128k,258k", "258,000", "-1", "128x", "200kk", "1,000,000"):
             with self.assertRaises(OPENCODE_SYNC_MODULE.argparse.ArgumentTypeError):
                 OPENCODE_SYNC_MODULE.parse_contexts(value)
 
-    def test_context_argument_rejects_zero_mixed_with_submodes(self):
-        with self.assertRaises(OPENCODE_SYNC_MODULE.argparse.ArgumentTypeError):
-            OPENCODE_SYNC_MODULE.parse_contexts("0,128000")
-
-    def test_context_list_generates_multiple_limited_versions(self):
+    def test_context_generates_limited_version(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={
@@ -557,15 +537,15 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            contexts=(128000, 258000),
+            contexts=(258000,),
         )
 
         self.assertEqual(
-            ["example-model", "example-model (128k)", "example-model (258k)"],
+            ["example-model", "example-model (258k)"],
             [model_id for model_id, _, _ in results],
         )
         self.assertEqual(
-            {"context": 128000, "input": 128000, "output": 32000},
+            {"context": 258000, "input": 258000, "output": 32000},
             results[1][1]["limit"],
         )
 

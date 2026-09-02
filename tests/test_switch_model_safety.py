@@ -118,9 +118,9 @@ class SwitchModelSafetyTests(unittest.TestCase):
             completed.returncode,
             completed.stdout + completed.stderr,
         )
-        self.assertIn("--context-threshold CONTEXT_THRESHOLD", completed.stdout)
-        self.assertIn("--context-limit CONTEXT_LIMIT", completed.stdout)
-        self.assertNotIn("--context TOKENS[,TOKENS...]", completed.stdout)
+        self.assertIn("--context TOKENS[,TOKENS...]", completed.stdout)
+        self.assertNotIn("--context-threshold", completed.stdout)
+        self.assertNotIn("--context-limit", completed.stdout)
 
     def test_generated_preview_uses_python_fallback_when_python3_is_unavailable(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
@@ -207,7 +207,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
         self.assertIn("matched: 1, mapped: 2, guessed: 3, ambiguous: 4, unmatched: 5", completed.stdout)
 
-    def test_generated_shell_forwards_context_threshold_and_limit(self):
+    def test_generated_shell_normalizes_and_forwards_context_list(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
         if bash is None:
             self.skipTest("bash is not available")
@@ -220,7 +220,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             harness = Path(directory) / "invoke-switch-model.sh"
             harness.write_text(
                 prefix
-                + '\nopencode_main() { printf "threshold=%s limit=%s\\n" "$4" "$5"; }\n'
+                + '\nopencode_main() { printf "context=%s\\n" "$4"; }\n'
                 + marker
                 + main,
                 encoding="utf-8",
@@ -231,10 +231,8 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                     str(harness),
                     "opencode",
                     "https://api.example.com",
-                    "--context-threshold",
-                    "128000",
-                    "--context-limit",
-                    "64000",
+                    "--context",
+                    "128k, 258,000,128000",
                 ),
                 cwd=str(ROOT),
                 stdout=subprocess.PIPE,
@@ -246,9 +244,41 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             )
 
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
-        self.assertIn("threshold=128000 limit=64000", completed.stdout)
+        self.assertIn("context=128000,258000", completed.stdout)
 
-    def test_generated_shell_rejects_invalid_context_limits(self):
+    def test_generated_shell_accepts_context_equals_form(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, main = generated.partition("# === 07-main.sh ===")
+        self.assertTrue(marker, "generated script must retain the main-module boundary")
+
+        with tempfile.TemporaryDirectory() as directory:
+            harness = Path(directory) / "invoke-switch-model.sh"
+            harness.write_text(
+                prefix
+                + '\nopencode_main() { printf "context=%s\\n" "$4"; }\n'
+                + marker
+                + main,
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                (bash, str(harness), "opencode", "https://api.example.com", "--context=200k"),
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        self.assertIn("context=200000", completed.stdout)
+
+    def test_generated_shell_rejects_invalid_context_values(self):
         bash = shutil.which("bash") or shutil.which("bash.exe")
         if bash is None:
             self.skipTest("bash is not available")
@@ -266,9 +296,9 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                 + main,
                 encoding="utf-8",
             )
-            for option, value in (("--context-threshold", "-1"), ("--context-limit", "12k")):
+            for value in ("1,,2", "-1", "0,128000", "128x", "200kk"):
                 completed = subprocess.run(
-                    (bash, str(harness), "opencode", option, value),
+                    (bash, str(harness), "opencode", "--context", value),
                     cwd=str(ROOT),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -279,6 +309,38 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                 )
                 self.assertNotEqual(0, completed.returncode)
                 self.assertNotIn("opencode-main-called", completed.stdout)
+
+    def test_removed_threshold_and_limit_options_are_rejected(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        for option in ("--context-threshold", "--context-limit"):
+            completed = subprocess.run(
+                (
+                    bash,
+                    str(GENERATED_SCRIPT),
+                    "opencode",
+                    "https://api.example.com",
+                    option,
+                    "128000",
+                    "--preview",
+                ),
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn(f"未知选项 {option}", completed.stdout + completed.stderr)
+
+            with redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit):
+                    OPENCODE_SYNC_MODULE.parse_args([option, "128000"])
 
     def test_missing_cache_rejects_incomplete_embedded_catalog_and_uses_runtime(self):
         args = Namespace(
@@ -441,14 +503,44 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
         self.assertEqual(1, metadata["requested_model_matches"])
         run_command.assert_not_called()
 
-    def test_python_context_arguments_reject_negative_values(self):
+    def test_context_argument_accepts_multiple_deduplicated_values(self):
+        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128k, 258,000,128000"])
+        self.assertEqual((128000, 258000), args.context)
+
+    def test_context_argument_accepts_plain_grouped_and_k_formats(self):
+        for value in ("200000", "200,000", "200k", "200K"):
+            args = OPENCODE_SYNC_MODULE.parse_args(["--context", value])
+            self.assertEqual((200000,), args.context)
+
+    def test_context_argument_accepts_multiple_grouped_values_with_comma_space(self):
+        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128,000, 258,000"])
+        self.assertEqual((128000, 258000), args.context)
+
+    def test_context_argument_accepts_k_and_grouped_values_without_space(self):
+        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128k,258,000"])
+        self.assertEqual((128000, 258000), args.context)
+
+    def test_context_argument_treats_adjacent_grouped_values_as_a_list(self):
+        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "128,000,258,000"])
+        self.assertEqual((128000, 258000), args.context)
+
+    def test_context_argument_accepts_equals_form_and_rejects_abbreviation(self):
+        args = OPENCODE_SYNC_MODULE.parse_args(["--context=200k"])
+        self.assertEqual((200000,), args.context)
         with redirect_stderr(StringIO()):
             with self.assertRaises(SystemExit):
-                OPENCODE_SYNC_MODULE.parse_args(["--context-threshold", "-1"])
-            with self.assertRaises(SystemExit):
-                OPENCODE_SYNC_MODULE.parse_args(["--context-limit", "-1"])
+                OPENCODE_SYNC_MODULE.parse_args(["--conte", "200k"])
 
-    def test_context_threshold_generates_one_limited_version(self):
+    def test_context_argument_rejects_invalid_or_ambiguous_values(self):
+        for value in ("", "1,,2", "-1", "128x", "200kk", "1,000,000"):
+            with self.assertRaises(OPENCODE_SYNC_MODULE.argparse.ArgumentTypeError):
+                OPENCODE_SYNC_MODULE.parse_contexts(value)
+
+    def test_context_argument_rejects_zero_mixed_with_submodes(self):
+        with self.assertRaises(OPENCODE_SYNC_MODULE.argparse.ArgumentTypeError):
+            OPENCODE_SYNC_MODULE.parse_contexts("0,128000")
+
+    def test_context_list_generates_multiple_limited_versions(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={
@@ -465,12 +557,11 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            context_threshold=258000,
-            context_limit=128000,
+            contexts=(128000, 258000),
         )
 
         self.assertEqual(
-            ["example-model", "example-model (128k)"],
+            ["example-model", "example-model (128k)", "example-model (258k)"],
             [model_id for model_id, _, _ in results],
         )
         self.assertEqual(
@@ -478,7 +569,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             results[1][1]["limit"],
         )
 
-    def test_context_threshold_zero_disables_limited_version(self):
+    def test_context_zero_disables_limited_versions(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={"limit": {"context": 1000000, "input": 900000, "output": 32000}},
@@ -490,7 +581,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            context_threshold=0,
+            contexts=(0,),
         )
 
         self.assertEqual(["example-model"], [model_id for model_id, _, _ in results])
@@ -507,14 +598,13 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            context_threshold=190000,
-            context_limit=190000,
+            contexts=(190000,),
         )
 
         self.assertEqual(["example-model", "example-model (190k)"], [model_id for model_id, _, _ in results])
         self.assertEqual({"context": 190000, "output": 32000}, results[1][1]["limit"])
 
-    def test_context_threshold_uses_total_context_even_when_input_is_smaller(self):
+    def test_context_uses_total_window_even_when_input_is_smaller(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={"limit": {"context": 400000, "input": 200000, "output": 128000}},
@@ -526,13 +616,12 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            context_threshold=258000,
-            context_limit=258000,
+            contexts=(258000,),
         )
 
         self.assertEqual(["example-model", "example-model (258k)"], [model_id for model_id, _, _ in results])
 
-    def test_context_limit_never_expands_original_limits(self):
+    def test_context_cap_never_expands_original_limits(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={"limit": {"context": 400000, "input": 272000, "output": 272000}},
@@ -544,8 +633,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            context_threshold=258000,
-            context_limit=258000,
+            contexts=(258000,),
         )
 
         self.assertEqual(
@@ -553,7 +641,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             results[1][1]["limit"],
         )
 
-    def test_context_limit_above_original_does_not_create_duplicate_version(self):
+    def test_context_above_original_does_not_create_duplicate_version(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
             full_id="openai/example-model",
             data={"limit": {"context": 512000, "input": 400000, "output": 64000}},
@@ -565,8 +653,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             entry,
             match,
             "none",
-            context_threshold=258000,
-            context_limit=1000000,
+            contexts=(1000000,),
         )
 
         self.assertEqual(["example-model"], [model_id for model_id, _, _ in results])
@@ -576,8 +663,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             api_key_env="NEWAPI_API_KEY",
             provider="newapi",
             variant_policy="none",
-            context_threshold=258000,
-            context_limit=128000,
+            context=(128000,),
         )
         model_reports = [
             {"model_id": "example-model", "status": "matched", "source_model": "openai/example-model"},
@@ -600,9 +686,9 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
 
         self.assertEqual(1, report["summary"]["matched"])
         self.assertEqual({"openai": 1}, report["provider_groups"])
-        self.assertNotIn("contexts", report)
-        self.assertEqual(258000, report["context_threshold"])
-        self.assertEqual(128000, report["context_limit"])
+        self.assertEqual([128000], report["contexts"])
+        self.assertNotIn("context_threshold", report)
+        self.assertNotIn("context_limit", report)
 
 if __name__ == "__main__":
     unittest.main()

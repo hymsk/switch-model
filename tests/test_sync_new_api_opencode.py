@@ -78,7 +78,7 @@ class PrefixFallbackTest(unittest.TestCase):
         self.assertEqual(2, match["prefix_segments"])
 
         generated = MODULE.model_config_from_entry(
-            {"id": "glm-5.3-flash-local"}, entry, match, "translate", context_threshold=258000
+            {"id": "glm-5.3-flash-local"}, entry, match, "translate", contexts=(258000,)
         )
         original_id, original_config, _ = generated[0]
         capped_id, capped_config, capped_report = generated[1]
@@ -173,7 +173,7 @@ class PrefixFallbackTest(unittest.TestCase):
     def test_report_counts_guessed_models(self):
         entry, match = MODULE.select_entry("glm-5.3-flash-local", self.entries, None)
         _, _, report = MODULE.model_config_from_entry(
-            {"id": "glm-5.3-flash-local"}, entry, match, "translate", context_threshold=0
+            {"id": "glm-5.3-flash-local"}, entry, match, "translate", contexts=(0,)
         )[0]
         args = MODULE.parse_args([
             "--base-url", "https://new-api.example.com",

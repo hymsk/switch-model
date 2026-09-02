@@ -18,8 +18,7 @@ usage() {
     echo "  --preview               预览模式，只输出配置文件位置与内容，不实际写入"
     echo ""
     echo "OpenCode Options:"
-    echo "  --context-threshold <tokens>    上下文阈值，超过此值生成双版本（默认: $DEFAULT_CONTEXT_THRESHOLD）"
-    echo "  --context-limit <tokens>        限制版本的总上下文窗口（默认: $DEFAULT_CONTEXT_LIMIT）"
+    echo "  --context <tokens[,tokens...]>  上下文子模式，支持 200000 / 200,000 / 200k（默认: $DEFAULT_CONTEXT；0 表示禁用）"
     echo "  --mapping-file <path>            显式模型 ID 到 OpenCode catalog ID 的 JSON 映射（默认: $DEFAULT_OPENCODE_MAPPING_FILE）"
     echo "  --no-prefix-fallback             关闭仅在精确匹配失败后启用的安全前缀元数据回退"
     echo "  Catalog 运行时顺序: 本地 cache -> 内嵌完整 snapshot -> 实时查询"
@@ -37,7 +36,8 @@ usage() {
     echo ""
     echo "  # OpenCode 模式"
     echo "  $0 opencode https://api.example.com --preview"
-    echo "  $0 opencode https://api.example.com --context-threshold 128000 --context-limit 128000"
+    echo "  $0 opencode https://api.example.com --context 128k,258k"
+    echo "  $0 opencode https://api.example.com --context \"128,000, 258,000\""
     echo "  $0 opencode https://api.example.com --mapping-file ~/.config/api-keys/model-mapping.json"
     echo "  $0 opencode https://api.example.com --no-prefix-fallback"
     echo ""
@@ -46,6 +46,68 @@ usage() {
     echo "  $0 codex https://api.example.com --preview"
     echo "  $0 opencode https://api.example.com --preview"
     exit "$exit_code"
+}
+
+normalize_context_argument() {
+    local value="$1"
+    local python_cmd
+    python_cmd=$(get_python_cmd)
+    if [ -z "$python_cmd" ]; then
+        echo -e "${RED}Error: --context validation requires Python 3${NC}" >&2
+        return 1
+    fi
+
+    "$python_cmd" - "$value" <<'PYEOF'
+import re
+import sys
+
+
+def fail(message):
+    print(f"Error: --context {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+text = sys.argv[1].strip()
+if not text:
+    fail("must contain at least one value")
+
+contexts = []
+seen = set()
+position = 0
+token_pattern = re.compile(r"(?:[0-9]+[kK]|[0-9]{1,3},[0-9]{3}|[0-9]+)")
+while position < len(text):
+    match = token_pattern.match(text, position)
+    if not match:
+        fail("supports values such as 200000, 200,000, or 200k")
+    token = match.group(0)
+    if re.fullmatch(r"[0-9]+[kK]", token):
+        context = int(token[:-1]) * 1000
+    elif re.fullmatch(r"[0-9]{1,3},[0-9]{3}", token):
+        context = int(token.replace(",", ""))
+    elif re.fullmatch(r"[0-9]+", token):
+        context = int(token)
+    else:
+        fail("supports values such as 200000, 200,000, or 200k")
+    if context not in seen:
+        seen.add(context)
+        contexts.append(context)
+    position = match.end()
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position == len(text):
+        break
+    if text[position] != ",":
+        fail("values must be comma-separated")
+    position += 1
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position == len(text):
+        fail("list cannot end with a separator")
+
+if 0 in seen and len(seen) > 1:
+    fail("value 0 cannot be combined with other values")
+print(",".join(str(context) for context in contexts))
+PYEOF
 }
 
 # ==================== 主逻辑 ====================
@@ -79,8 +141,7 @@ esac
 
 # 解析剩余选项：扫描所有参数，识别 --* 选项，其余作为位置参数保留
 POSITIONAL=()
-CONTEXT_THRESHOLD=$DEFAULT_CONTEXT_THRESHOLD
-CONTEXT_LIMIT=$DEFAULT_CONTEXT_LIMIT
+CONTEXT=$DEFAULT_CONTEXT
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help)
@@ -103,21 +164,21 @@ while [ "$#" -gt 0 ]; do
             SK_FILE="$2"
             shift 2
             ;;
-        --context-threshold)
-            if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}Error: --context-threshold requires argument <tokens>${NC}"
+        --context)
+            if [ -z "${2:-}" ] || [[ "$2" == --* ]]; then
+                echo -e "${RED}Error: --context requires argument <tokens[,tokens...]>${NC}"
                 usage
             fi
-            CONTEXT_THRESHOLD="$2"
+            CONTEXT=$(normalize_context_argument "$2") || usage
             shift 2
             ;;
-        --context-limit)
-            if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}Error: --context-limit requires argument <tokens>${NC}"
+        --context=*)
+            if [ -z "${1#--context=}" ]; then
+                echo -e "${RED}Error: --context requires argument <tokens[,tokens...]>${NC}"
                 usage
             fi
-            CONTEXT_LIMIT="$2"
-            shift 2
+            CONTEXT=$(normalize_context_argument "${1#--context=}") || usage
+            shift
             ;;
         --mapping-file)
             if [ -z "${2:-}" ] || [[ "$2" == --* ]]; then
@@ -174,6 +235,6 @@ case "$TOOL_MODE" in
         URL="${1:-$DEFAULT_API_URL}"
         PROVIDER="${2:-$DEFAULT_OPENCODE_PROVIDER}"
         PROVIDER_NAME="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-        opencode_main "$URL" "$PROVIDER" "$PROVIDER_NAME" "$CONTEXT_THRESHOLD" "$CONTEXT_LIMIT"
+        opencode_main "$URL" "$PROVIDER" "$PROVIDER_NAME" "$CONTEXT"
         ;;
 esac

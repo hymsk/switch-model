@@ -11,13 +11,12 @@ run_opencode_sync() {
 }
 
 # 更新 OpenCode 配置文件（调用 sync_new_api_opencode.py）
-# 参数: $1=base_url, $2=provider, $3=provider_name, $4=context_threshold, $5=context_limit
+# 参数: $1=base_url, $2=provider, $3=provider_name, $4=context
 update_opencode_config() {
     local base_url="$1"
     local provider="${2:-$DEFAULT_OPENCODE_PROVIDER}"
     local provider_name="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-    local context_threshold="${4-$DEFAULT_CONTEXT_THRESHOLD}"
-    local context_limit="${5-$DEFAULT_CONTEXT_LIMIT}"
+    local context="${4-$DEFAULT_CONTEXT}"
     local mapping_file="${OPENCODE_MAPPING_FILE:-$DEFAULT_OPENCODE_MAPPING_FILE}"
     local mapping_file_explicit="${OPENCODE_MAPPING_FILE_EXPLICIT:-false}"
     local prefix_fallback="${OPENCODE_PREFIX_FALLBACK:-true}"
@@ -45,15 +44,6 @@ update_opencode_config() {
     local api_key
     api_key=$(cat "$SK_FILE" | tr -d '[:space:]')
 
-    # 构建阈值参数
-    local -a threshold_args=()
-    if [[ "$context_threshold" =~ ^[0-9]+$ ]]; then
-        threshold_args+=(--context-threshold "$context_threshold")
-    fi
-    if [[ "$context_limit" =~ ^[1-9][0-9]*$ ]]; then
-        threshold_args+=(--context-limit "$context_limit")
-    fi
-
     # 调用内嵌同步器直接生成并写入配置（apiKey 引用由 --api-key-file 生成）
     if NEWAPI_API_KEY="$api_key" \
     NEWAPI_BASE_URL="$base_url" \
@@ -65,7 +55,7 @@ update_opencode_config() {
         --config "$OPENCODE_CONFIG" \
         --write \
         --report "$report_file" \
-        "${threshold_args[@]}" \
+        --context "$context" \
         "${sync_args[@]}" \
         2>&1; then
         echo -e "${GREEN}OpenCode config 更新成功${NC}"
@@ -77,13 +67,12 @@ update_opencode_config() {
 }
 
 # 预览 OpenCode 配置（调用 sync_new_api_opencode.py 生成预览）
-# 参数: $1=base_url, $2=provider, $3=provider_name, $4=context_threshold, $5=context_limit
+# 参数: $1=base_url, $2=provider, $3=provider_name, $4=context
 preview_opencode_config() {
     local base_url="$1"
     local provider="${2:-$DEFAULT_OPENCODE_PROVIDER}"
     local provider_name="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-    local context_threshold="${4-$DEFAULT_CONTEXT_THRESHOLD}"
-    local context_limit="${5-$DEFAULT_CONTEXT_LIMIT}"
+    local context="${4-$DEFAULT_CONTEXT}"
     local mapping_file="${OPENCODE_MAPPING_FILE:-$DEFAULT_OPENCODE_MAPPING_FILE}"
     local mapping_file_explicit="${OPENCODE_MAPPING_FILE_EXPLICIT:-false}"
     local prefix_fallback="${OPENCODE_PREFIX_FALLBACK:-true}"
@@ -109,15 +98,6 @@ preview_opencode_config() {
     local api_key
     api_key=$(cat "$SK_FILE" | tr -d '[:space:]')
 
-    # 构建阈值参数
-    local -a threshold_args=()
-    if [[ "$context_threshold" =~ ^[0-9]+$ ]]; then
-        threshold_args+=(--context-threshold "$context_threshold")
-    fi
-    if [[ "$context_limit" =~ ^[1-9][0-9]*$ ]]; then
-        threshold_args+=(--context-limit "$context_limit")
-    fi
-
     # 预览只使用临时文件，不写持久报告。
     local preview_file
     preview_file=$(mktemp "${TMPDIR:-/tmp}/switch-model-preview.XXXXXX.json") || return 1
@@ -137,7 +117,7 @@ preview_opencode_config() {
         --api-key-file "$SK_FILE" \
         --output "$preview_file" \
         --report "$report_file" \
-        "${threshold_args[@]}" \
+        --context "$context" \
         "${sync_args[@]}" \
         2>&1; then
         exit_code=0
@@ -184,13 +164,12 @@ PYEOF
 }
 
 # OpenCode 模式主函数
-# 参数: $1=API_URL, $2=provider, $3=provider_name, $4=context_threshold, $5=context_limit
+# 参数: $1=API_URL, $2=provider, $3=provider_name, $4=context
 opencode_main() {
     local api_url="$1"
     local provider="${2:-$DEFAULT_OPENCODE_PROVIDER}"
     local provider_name="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-    local context_threshold="${4-$DEFAULT_CONTEXT_THRESHOLD}"
-    local context_limit="${5-$DEFAULT_CONTEXT_LIMIT}"
+    local context="${4-$DEFAULT_CONTEXT}"
 
     # 在创建或更新 OpenCode 配置前先校验 SK，避免空 SK 产生配置改动
     read_sk_from_file
@@ -200,7 +179,7 @@ opencode_main() {
 
     # 预览模式
     if [ "$PREVIEW" = true ]; then
-        preview_opencode_config "$api_url" "$provider" "$provider_name" "$context_threshold" "$context_limit"
+        preview_opencode_config "$api_url" "$provider" "$provider_name" "$context"
         return $?
     fi
 
@@ -210,14 +189,12 @@ opencode_main() {
     echo -e "  Provider   : ${YELLOW}${provider}${NC}"
     echo -e "  Config     : ${YELLOW}${OPENCODE_CONFIG}${NC}"
 
-    # 显示阈值配置
-    if [ "$context_threshold" -gt 0 ] 2>/dev/null; then
-        echo -e "  Context阈值: ${YELLOW}${context_threshold}${NC}"
-        echo -e "  Context限制: ${YELLOW}${context_limit}${NC}"
+    if [ "$context" != "0" ]; then
+        echo -e "  Context子模式: ${YELLOW}${context}${NC}"
     fi
 
     # 更新配置
-    if update_opencode_config "$api_url" "$provider" "$provider_name" "$context_threshold" "$context_limit"; then
+    if update_opencode_config "$api_url" "$provider" "$provider_name" "$context"; then
         echo ""
         echo -e "${GREEN}✓ OpenCode 切换成功${NC}"
     else

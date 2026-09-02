@@ -32,11 +32,9 @@ DEFAULT_OPENCODE_PROVIDER="newapi"
 # OpenCode 默认 provider 名称
 DEFAULT_OPENCODE_PROVIDER_NAME="New API"
 
-# OpenCode 上下文限制（0 表示不限制）
-# 超过阈值的模型会生成两个版本：原版本和限制版本
-# 建议阈值：258000，避免过大上下文导致压缩延迟
-DEFAULT_CONTEXT_THRESHOLD=258000
-DEFAULT_CONTEXT_LIMIT=258000
+# OpenCode 上下文子模式列表（逗号分隔，0 表示不生成子模式）
+# 超过指定值的模型会保留原版本，并为每个适用值生成限制版本
+DEFAULT_CONTEXT="258000"
 
 # OpenCode 模型显式映射文件；存在时优先于 catalog 匹配与前缀回退
 DEFAULT_OPENCODE_MAPPING_FILE="$HOME/.config/api-keys/model-mapping.json"

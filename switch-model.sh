@@ -346,14 +346,58 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def non_negative_int(value: str) -> int:
-    if not re.fullmatch(r"[0-9]+", str(value)):
-        raise argparse.ArgumentTypeError("must be a non-negative integer")
-    return int(value)
+def parse_context_token(value: str) -> int:
+    token = str(value).strip()
+    if re.fullmatch(r"[0-9]+[kK]", token):
+        return int(token[:-1]) * 1000
+    if re.fullmatch(r"[0-9]{1,3},[0-9]{3}", token):
+        return int(token.replace(",", ""))
+    if re.fullmatch(r"[0-9]+", token):
+        return int(token)
+    raise argparse.ArgumentTypeError(
+        "must use token counts such as 200000, 200,000, or 200k"
+    )
+
+
+def parse_contexts(value: str) -> Tuple[int, ...]:
+    text = str(value).strip()
+    if not text:
+        raise argparse.ArgumentTypeError("must contain at least one context value")
+
+    contexts: List[int] = []
+    seen: Set[int] = set()
+    position = 0
+    token_pattern = re.compile(r"(?:[0-9]+[kK]|[0-9]{1,3},[0-9]{3}|[0-9]+)")
+    while position < len(text):
+        match = token_pattern.match(text, position)
+        if not match:
+            raise argparse.ArgumentTypeError(
+                "must use token counts such as 200000, 200,000, or 200k"
+            )
+        context = parse_context_token(match.group(0))
+        if context not in seen:
+            seen.add(context)
+            contexts.append(context)
+        position = match.end()
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text):
+            break
+        if text[position] != ",":
+            raise argparse.ArgumentTypeError("context values must be comma-separated")
+        position += 1
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text):
+            raise argparse.ArgumentTypeError("context list cannot end with a separator")
+    if 0 in seen and len(seen) > 1:
+        raise argparse.ArgumentTypeError("0 cannot be combined with other context values")
+    return tuple(contexts)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description=(
             "Fetch New API models, match them against the current OpenCode built-in catalog, "
             "and generate or replace provider model metadata."
@@ -461,16 +505,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--strict", action="store_true", help="Exit 2 if any model is unmatched or ambiguous")
     parser.add_argument("--write", action="store_true", help="Replace all providers in --config after creating a backup")
     parser.add_argument(
-        "--context-threshold",
-        type=non_negative_int,
-        default=258000,
-        help="Context threshold in tokens. Models exceeding this will generate two versions: original and limited. 0 means no threshold (default: 258000)",
-    )
-    parser.add_argument(
-        "--context-limit",
-        type=non_negative_int,
-        default=0,
-        help="Total context-window limit for the capped version. 0 means use threshold value (default: 0 = same as threshold)",
+        "--context",
+        type=parse_contexts,
+        default=(258000,),
+        metavar="TOKENS[,TOKENS...]",
+        help=(
+            "Generate one capped submode per total context-window limit (examples: 200000, 200,000, 200k). "
+            "Separate multiple grouped values with comma-space. "
+            "Use 0 to disable capped submodes (default: 258000)"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -1237,12 +1280,12 @@ def positive_limit(data: Any) -> Dict[str, int]:
     return result
 
 
-def apply_context_limit(limit: Dict[str, int], context_limit: int) -> Dict[str, int]:
+def apply_context_cap(limit: Dict[str, int], context: int) -> Dict[str, int]:
     """Cap the total context window without expanding any catalog limit."""
-    if context_limit <= 0:
+    if context <= 0:
         return dict(limit)
     result = dict(limit)
-    result["context"] = min(result.get("context", context_limit), context_limit)
+    result["context"] = min(result.get("context", context), context)
     if "input" in result:
         result["input"] = min(result["input"], result["context"])
     if "output" in result:
@@ -1250,8 +1293,8 @@ def apply_context_limit(limit: Dict[str, int], context_limit: int) -> Dict[str, 
     return result
 
 
-def context_suffix(context_limit: int) -> str:
-    value = f"{context_limit // 1000}k" if context_limit % 1000 == 0 else str(context_limit)
+def context_suffix(context: int) -> str:
+    value = f"{context // 1000}k" if context % 1000 == 0 else str(context)
     return f" ({value})"
 
 
@@ -1261,10 +1304,9 @@ def model_config_from_entry(
     match: Dict[str, Any],
     variant_policy: str,
     provider_type: str = "openai-compatible",
-    context_threshold: int = 258000,
-    context_limit: int = 0,
+    contexts: Tuple[int, ...] = (258000,),
 ) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-    """Generate the original model and one capped version when the threshold applies."""
+    """Generate the original model plus each applicable capped context submode."""
     model_id = str(new_model["id"])
     name = model_id
     config: Dict[str, Any] = {"name": name}
@@ -1311,22 +1353,20 @@ def model_config_from_entry(
     results.append((model_id, config, report))
 
     original_context = limit.get("context", 0)
-    if context_threshold > 0 and original_context > context_threshold:
-        requested_limit = context_limit if context_limit > 0 else context_threshold
-        effective_limit = min(requested_limit, original_context)
-        if effective_limit >= original_context:
-            return results
-        capped_model_id = model_id + context_suffix(effective_limit)
+    for context in contexts:
+        if context <= 0 or original_context <= context:
+            continue
+        capped_model_id = model_id + context_suffix(context)
         capped_config = copy.deepcopy(config)
         capped_config["name"] = capped_model_id  # 显示名称带后缀
         capped_config["id"] = model_id  # 保持原始模型 ID 用于 API 调用
-        capped_config["limit"] = apply_context_limit(limit, effective_limit)
+        capped_config["limit"] = apply_context_cap(limit, context)
 
         capped_report = copy.deepcopy(report)
         capped_report["model_id"] = capped_model_id
         capped_report["capped_from"] = model_id
         capped_report["limit"] = capped_config["limit"]
-        capped_report["warnings"] = warnings + [f"context window capped from {original_context} to {effective_limit}"]
+        capped_report["warnings"] = warnings + [f"context window capped from {original_context} to {context}"]
 
         results.append((capped_model_id, capped_config, capped_report))
 
@@ -1405,8 +1445,7 @@ def build_provider_fragment(
     reports: List[Dict[str, Any]] = []
     api_key_ref = get_api_key_reference(args)
 
-    context_threshold = args.context_threshold
-    context_limit = args.context_limit
+    contexts = args.context
 
     if args.provider_type != "auto-group":
         # Single-provider mode: openai-compatible / bailian / dashscope all produce one
@@ -1421,8 +1460,7 @@ def build_provider_fragment(
                 match,
                 args.variant_policy,
                 args.provider_type,
-                context_threshold,
-                context_limit,
+                contexts,
             )
             for mid, config, report in results:
                 generated[mid] = config
@@ -1459,8 +1497,7 @@ def build_provider_fragment(
                 match,
                 args.variant_policy,
                 "openai-compatible",
-                context_threshold,
-                context_limit,
+                contexts,
             )
             for mid, config, report in results:
                 group_generated[mid] = config
@@ -1692,8 +1729,7 @@ def make_report(
         "provider": args.provider,
         "provider_groups": provider_groups,
         "variant_policy": args.variant_policy,
-        "context_threshold": args.context_threshold,
-        "context_limit": args.context_limit if args.context_limit > 0 else args.context_threshold,
+        "contexts": list(args.context),
         "summary": counts,
         "models": model_reports,
     }
@@ -1821,11 +1857,9 @@ DEFAULT_OPENCODE_PROVIDER="newapi"
 # OpenCode 默认 provider 名称
 DEFAULT_OPENCODE_PROVIDER_NAME="New API"
 
-# OpenCode 上下文限制（0 表示不限制）
-# 超过阈值的模型会生成两个版本：原版本和限制版本
-# 建议阈值：258000，避免过大上下文导致压缩延迟
-DEFAULT_CONTEXT_THRESHOLD=258000
-DEFAULT_CONTEXT_LIMIT=258000
+# OpenCode 上下文子模式列表（逗号分隔，0 表示不生成子模式）
+# 超过指定值的模型会保留原版本，并为每个适用值生成限制版本
+DEFAULT_CONTEXT="258000"
 
 # OpenCode 模型显式映射文件；存在时优先于 catalog 匹配与前缀回退
 DEFAULT_OPENCODE_MAPPING_FILE="$HOME/.config/api-keys/model-mapping.json"
@@ -2452,13 +2486,12 @@ run_opencode_sync() {
 }
 
 # 更新 OpenCode 配置文件（调用 sync_new_api_opencode.py）
-# 参数: $1=base_url, $2=provider, $3=provider_name, $4=context_threshold, $5=context_limit
+# 参数: $1=base_url, $2=provider, $3=provider_name, $4=context
 update_opencode_config() {
     local base_url="$1"
     local provider="${2:-$DEFAULT_OPENCODE_PROVIDER}"
     local provider_name="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-    local context_threshold="${4-$DEFAULT_CONTEXT_THRESHOLD}"
-    local context_limit="${5-$DEFAULT_CONTEXT_LIMIT}"
+    local context="${4-$DEFAULT_CONTEXT}"
     local mapping_file="${OPENCODE_MAPPING_FILE:-$DEFAULT_OPENCODE_MAPPING_FILE}"
     local mapping_file_explicit="${OPENCODE_MAPPING_FILE_EXPLICIT:-false}"
     local prefix_fallback="${OPENCODE_PREFIX_FALLBACK:-true}"
@@ -2486,15 +2519,6 @@ update_opencode_config() {
     local api_key
     api_key=$(cat "$SK_FILE" | tr -d '[:space:]')
 
-    # 构建阈值参数
-    local -a threshold_args=()
-    if [[ "$context_threshold" =~ ^[0-9]+$ ]]; then
-        threshold_args+=(--context-threshold "$context_threshold")
-    fi
-    if [[ "$context_limit" =~ ^[1-9][0-9]*$ ]]; then
-        threshold_args+=(--context-limit "$context_limit")
-    fi
-
     # 调用内嵌同步器直接生成并写入配置（apiKey 引用由 --api-key-file 生成）
     if NEWAPI_API_KEY="$api_key" \
     NEWAPI_BASE_URL="$base_url" \
@@ -2506,7 +2530,7 @@ update_opencode_config() {
         --config "$OPENCODE_CONFIG" \
         --write \
         --report "$report_file" \
-        "${threshold_args[@]}" \
+        --context "$context" \
         "${sync_args[@]}" \
         2>&1; then
         echo -e "${GREEN}OpenCode config 更新成功${NC}"
@@ -2518,13 +2542,12 @@ update_opencode_config() {
 }
 
 # 预览 OpenCode 配置（调用 sync_new_api_opencode.py 生成预览）
-# 参数: $1=base_url, $2=provider, $3=provider_name, $4=context_threshold, $5=context_limit
+# 参数: $1=base_url, $2=provider, $3=provider_name, $4=context
 preview_opencode_config() {
     local base_url="$1"
     local provider="${2:-$DEFAULT_OPENCODE_PROVIDER}"
     local provider_name="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-    local context_threshold="${4-$DEFAULT_CONTEXT_THRESHOLD}"
-    local context_limit="${5-$DEFAULT_CONTEXT_LIMIT}"
+    local context="${4-$DEFAULT_CONTEXT}"
     local mapping_file="${OPENCODE_MAPPING_FILE:-$DEFAULT_OPENCODE_MAPPING_FILE}"
     local mapping_file_explicit="${OPENCODE_MAPPING_FILE_EXPLICIT:-false}"
     local prefix_fallback="${OPENCODE_PREFIX_FALLBACK:-true}"
@@ -2550,15 +2573,6 @@ preview_opencode_config() {
     local api_key
     api_key=$(cat "$SK_FILE" | tr -d '[:space:]')
 
-    # 构建阈值参数
-    local -a threshold_args=()
-    if [[ "$context_threshold" =~ ^[0-9]+$ ]]; then
-        threshold_args+=(--context-threshold "$context_threshold")
-    fi
-    if [[ "$context_limit" =~ ^[1-9][0-9]*$ ]]; then
-        threshold_args+=(--context-limit "$context_limit")
-    fi
-
     # 预览只使用临时文件，不写持久报告。
     local preview_file
     preview_file=$(mktemp "${TMPDIR:-/tmp}/switch-model-preview.XXXXXX.json") || return 1
@@ -2578,7 +2592,7 @@ preview_opencode_config() {
         --api-key-file "$SK_FILE" \
         --output "$preview_file" \
         --report "$report_file" \
-        "${threshold_args[@]}" \
+        --context "$context" \
         "${sync_args[@]}" \
         2>&1; then
         exit_code=0
@@ -2625,13 +2639,12 @@ PYEOF
 }
 
 # OpenCode 模式主函数
-# 参数: $1=API_URL, $2=provider, $3=provider_name, $4=context_threshold, $5=context_limit
+# 参数: $1=API_URL, $2=provider, $3=provider_name, $4=context
 opencode_main() {
     local api_url="$1"
     local provider="${2:-$DEFAULT_OPENCODE_PROVIDER}"
     local provider_name="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-    local context_threshold="${4-$DEFAULT_CONTEXT_THRESHOLD}"
-    local context_limit="${5-$DEFAULT_CONTEXT_LIMIT}"
+    local context="${4-$DEFAULT_CONTEXT}"
 
     # 在创建或更新 OpenCode 配置前先校验 SK，避免空 SK 产生配置改动
     read_sk_from_file
@@ -2641,7 +2654,7 @@ opencode_main() {
 
     # 预览模式
     if [ "$PREVIEW" = true ]; then
-        preview_opencode_config "$api_url" "$provider" "$provider_name" "$context_threshold" "$context_limit"
+        preview_opencode_config "$api_url" "$provider" "$provider_name" "$context"
         return $?
     fi
 
@@ -2651,14 +2664,12 @@ opencode_main() {
     echo -e "  Provider   : ${YELLOW}${provider}${NC}"
     echo -e "  Config     : ${YELLOW}${OPENCODE_CONFIG}${NC}"
 
-    # 显示阈值配置
-    if [ "$context_threshold" -gt 0 ] 2>/dev/null; then
-        echo -e "  Context阈值: ${YELLOW}${context_threshold}${NC}"
-        echo -e "  Context限制: ${YELLOW}${context_limit}${NC}"
+    if [ "$context" != "0" ]; then
+        echo -e "  Context子模式: ${YELLOW}${context}${NC}"
     fi
 
     # 更新配置
-    if update_opencode_config "$api_url" "$provider" "$provider_name" "$context_threshold" "$context_limit"; then
+    if update_opencode_config "$api_url" "$provider" "$provider_name" "$context"; then
         echo ""
         echo -e "${GREEN}✓ OpenCode 切换成功${NC}"
     else
@@ -2687,8 +2698,7 @@ usage() {
     echo "  --preview               预览模式，只输出配置文件位置与内容，不实际写入"
     echo ""
     echo "OpenCode Options:"
-    echo "  --context-threshold <tokens>    上下文阈值，超过此值生成双版本（默认: $DEFAULT_CONTEXT_THRESHOLD）"
-    echo "  --context-limit <tokens>        限制版本的总上下文窗口（默认: $DEFAULT_CONTEXT_LIMIT）"
+    echo "  --context <tokens[,tokens...]>  上下文子模式，支持 200000 / 200,000 / 200k（默认: $DEFAULT_CONTEXT；0 表示禁用）"
     echo "  --mapping-file <path>            显式模型 ID 到 OpenCode catalog ID 的 JSON 映射（默认: $DEFAULT_OPENCODE_MAPPING_FILE）"
     echo "  --no-prefix-fallback             关闭仅在精确匹配失败后启用的安全前缀元数据回退"
     echo "  Catalog 运行时顺序: 本地 cache -> 内嵌完整 snapshot -> 实时查询"
@@ -2706,7 +2716,8 @@ usage() {
     echo ""
     echo "  # OpenCode 模式"
     echo "  $0 opencode https://api.example.com --preview"
-    echo "  $0 opencode https://api.example.com --context-threshold 128000 --context-limit 128000"
+    echo "  $0 opencode https://api.example.com --context 128k,258k"
+    echo "  $0 opencode https://api.example.com --context \"128,000, 258,000\""
     echo "  $0 opencode https://api.example.com --mapping-file ~/.config/api-keys/model-mapping.json"
     echo "  $0 opencode https://api.example.com --no-prefix-fallback"
     echo ""
@@ -2715,6 +2726,68 @@ usage() {
     echo "  $0 codex https://api.example.com --preview"
     echo "  $0 opencode https://api.example.com --preview"
     exit "$exit_code"
+}
+
+normalize_context_argument() {
+    local value="$1"
+    local python_cmd
+    python_cmd=$(get_python_cmd)
+    if [ -z "$python_cmd" ]; then
+        echo -e "${RED}Error: --context validation requires Python 3${NC}" >&2
+        return 1
+    fi
+
+    "$python_cmd" - "$value" <<'PYEOF'
+import re
+import sys
+
+
+def fail(message):
+    print(f"Error: --context {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+text = sys.argv[1].strip()
+if not text:
+    fail("must contain at least one value")
+
+contexts = []
+seen = set()
+position = 0
+token_pattern = re.compile(r"(?:[0-9]+[kK]|[0-9]{1,3},[0-9]{3}|[0-9]+)")
+while position < len(text):
+    match = token_pattern.match(text, position)
+    if not match:
+        fail("supports values such as 200000, 200,000, or 200k")
+    token = match.group(0)
+    if re.fullmatch(r"[0-9]+[kK]", token):
+        context = int(token[:-1]) * 1000
+    elif re.fullmatch(r"[0-9]{1,3},[0-9]{3}", token):
+        context = int(token.replace(",", ""))
+    elif re.fullmatch(r"[0-9]+", token):
+        context = int(token)
+    else:
+        fail("supports values such as 200000, 200,000, or 200k")
+    if context not in seen:
+        seen.add(context)
+        contexts.append(context)
+    position = match.end()
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position == len(text):
+        break
+    if text[position] != ",":
+        fail("values must be comma-separated")
+    position += 1
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position == len(text):
+        fail("list cannot end with a separator")
+
+if 0 in seen and len(seen) > 1:
+    fail("value 0 cannot be combined with other values")
+print(",".join(str(context) for context in contexts))
+PYEOF
 }
 
 # ==================== 主逻辑 ====================
@@ -2748,8 +2821,7 @@ esac
 
 # 解析剩余选项：扫描所有参数，识别 --* 选项，其余作为位置参数保留
 POSITIONAL=()
-CONTEXT_THRESHOLD=$DEFAULT_CONTEXT_THRESHOLD
-CONTEXT_LIMIT=$DEFAULT_CONTEXT_LIMIT
+CONTEXT=$DEFAULT_CONTEXT
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help)
@@ -2772,21 +2844,21 @@ while [ "$#" -gt 0 ]; do
             SK_FILE="$2"
             shift 2
             ;;
-        --context-threshold)
-            if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}Error: --context-threshold requires argument <tokens>${NC}"
+        --context)
+            if [ -z "${2:-}" ] || [[ "$2" == --* ]]; then
+                echo -e "${RED}Error: --context requires argument <tokens[,tokens...]>${NC}"
                 usage
             fi
-            CONTEXT_THRESHOLD="$2"
+            CONTEXT=$(normalize_context_argument "$2") || usage
             shift 2
             ;;
-        --context-limit)
-            if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}Error: --context-limit requires argument <tokens>${NC}"
+        --context=*)
+            if [ -z "${1#--context=}" ]; then
+                echo -e "${RED}Error: --context requires argument <tokens[,tokens...]>${NC}"
                 usage
             fi
-            CONTEXT_LIMIT="$2"
-            shift 2
+            CONTEXT=$(normalize_context_argument "${1#--context=}") || usage
+            shift
             ;;
         --mapping-file)
             if [ -z "${2:-}" ] || [[ "$2" == --* ]]; then
@@ -2843,7 +2915,7 @@ case "$TOOL_MODE" in
         URL="${1:-$DEFAULT_API_URL}"
         PROVIDER="${2:-$DEFAULT_OPENCODE_PROVIDER}"
         PROVIDER_NAME="${3:-$DEFAULT_OPENCODE_PROVIDER_NAME}"
-        opencode_main "$URL" "$PROVIDER" "$PROVIDER_NAME" "$CONTEXT_THRESHOLD" "$CONTEXT_LIMIT"
+        opencode_main "$URL" "$PROVIDER" "$PROVIDER_NAME" "$CONTEXT"
         ;;
 esac
 

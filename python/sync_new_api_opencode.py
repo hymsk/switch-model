@@ -94,14 +94,58 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def non_negative_int(value: str) -> int:
-    if not re.fullmatch(r"[0-9]+", str(value)):
-        raise argparse.ArgumentTypeError("must be a non-negative integer")
-    return int(value)
+def parse_context_token(value: str) -> int:
+    token = str(value).strip()
+    if re.fullmatch(r"[0-9]+[kK]", token):
+        return int(token[:-1]) * 1000
+    if re.fullmatch(r"[0-9]{1,3},[0-9]{3}", token):
+        return int(token.replace(",", ""))
+    if re.fullmatch(r"[0-9]+", token):
+        return int(token)
+    raise argparse.ArgumentTypeError(
+        "must use token counts such as 200000, 200,000, or 200k"
+    )
+
+
+def parse_contexts(value: str) -> Tuple[int, ...]:
+    text = str(value).strip()
+    if not text:
+        raise argparse.ArgumentTypeError("must contain at least one context value")
+
+    contexts: List[int] = []
+    seen: Set[int] = set()
+    position = 0
+    token_pattern = re.compile(r"(?:[0-9]+[kK]|[0-9]{1,3},[0-9]{3}|[0-9]+)")
+    while position < len(text):
+        match = token_pattern.match(text, position)
+        if not match:
+            raise argparse.ArgumentTypeError(
+                "must use token counts such as 200000, 200,000, or 200k"
+            )
+        context = parse_context_token(match.group(0))
+        if context not in seen:
+            seen.add(context)
+            contexts.append(context)
+        position = match.end()
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text):
+            break
+        if text[position] != ",":
+            raise argparse.ArgumentTypeError("context values must be comma-separated")
+        position += 1
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text):
+            raise argparse.ArgumentTypeError("context list cannot end with a separator")
+    if 0 in seen and len(seen) > 1:
+        raise argparse.ArgumentTypeError("0 cannot be combined with other context values")
+    return tuple(contexts)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description=(
             "Fetch New API models, match them against the current OpenCode built-in catalog, "
             "and generate or replace provider model metadata."
@@ -209,16 +253,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--strict", action="store_true", help="Exit 2 if any model is unmatched or ambiguous")
     parser.add_argument("--write", action="store_true", help="Replace all providers in --config after creating a backup")
     parser.add_argument(
-        "--context-threshold",
-        type=non_negative_int,
-        default=258000,
-        help="Context threshold in tokens. Models exceeding this will generate two versions: original and limited. 0 means no threshold (default: 258000)",
-    )
-    parser.add_argument(
-        "--context-limit",
-        type=non_negative_int,
-        default=0,
-        help="Total context-window limit for the capped version. 0 means use threshold value (default: 0 = same as threshold)",
+        "--context",
+        type=parse_contexts,
+        default=(258000,),
+        metavar="TOKENS[,TOKENS...]",
+        help=(
+            "Generate one capped submode per total context-window limit (examples: 200000, 200,000, 200k). "
+            "Separate multiple grouped values with comma-space. "
+            "Use 0 to disable capped submodes (default: 258000)"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -985,12 +1028,12 @@ def positive_limit(data: Any) -> Dict[str, int]:
     return result
 
 
-def apply_context_limit(limit: Dict[str, int], context_limit: int) -> Dict[str, int]:
+def apply_context_cap(limit: Dict[str, int], context: int) -> Dict[str, int]:
     """Cap the total context window without expanding any catalog limit."""
-    if context_limit <= 0:
+    if context <= 0:
         return dict(limit)
     result = dict(limit)
-    result["context"] = min(result.get("context", context_limit), context_limit)
+    result["context"] = min(result.get("context", context), context)
     if "input" in result:
         result["input"] = min(result["input"], result["context"])
     if "output" in result:
@@ -998,8 +1041,8 @@ def apply_context_limit(limit: Dict[str, int], context_limit: int) -> Dict[str, 
     return result
 
 
-def context_suffix(context_limit: int) -> str:
-    value = f"{context_limit // 1000}k" if context_limit % 1000 == 0 else str(context_limit)
+def context_suffix(context: int) -> str:
+    value = f"{context // 1000}k" if context % 1000 == 0 else str(context)
     return f" ({value})"
 
 
@@ -1009,10 +1052,9 @@ def model_config_from_entry(
     match: Dict[str, Any],
     variant_policy: str,
     provider_type: str = "openai-compatible",
-    context_threshold: int = 258000,
-    context_limit: int = 0,
+    contexts: Tuple[int, ...] = (258000,),
 ) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-    """Generate the original model and one capped version when the threshold applies."""
+    """Generate the original model plus each applicable capped context submode."""
     model_id = str(new_model["id"])
     name = model_id
     config: Dict[str, Any] = {"name": name}
@@ -1059,22 +1101,20 @@ def model_config_from_entry(
     results.append((model_id, config, report))
 
     original_context = limit.get("context", 0)
-    if context_threshold > 0 and original_context > context_threshold:
-        requested_limit = context_limit if context_limit > 0 else context_threshold
-        effective_limit = min(requested_limit, original_context)
-        if effective_limit >= original_context:
-            return results
-        capped_model_id = model_id + context_suffix(effective_limit)
+    for context in contexts:
+        if context <= 0 or original_context <= context:
+            continue
+        capped_model_id = model_id + context_suffix(context)
         capped_config = copy.deepcopy(config)
         capped_config["name"] = capped_model_id  # 显示名称带后缀
         capped_config["id"] = model_id  # 保持原始模型 ID 用于 API 调用
-        capped_config["limit"] = apply_context_limit(limit, effective_limit)
+        capped_config["limit"] = apply_context_cap(limit, context)
 
         capped_report = copy.deepcopy(report)
         capped_report["model_id"] = capped_model_id
         capped_report["capped_from"] = model_id
         capped_report["limit"] = capped_config["limit"]
-        capped_report["warnings"] = warnings + [f"context window capped from {original_context} to {effective_limit}"]
+        capped_report["warnings"] = warnings + [f"context window capped from {original_context} to {context}"]
 
         results.append((capped_model_id, capped_config, capped_report))
 
@@ -1153,8 +1193,7 @@ def build_provider_fragment(
     reports: List[Dict[str, Any]] = []
     api_key_ref = get_api_key_reference(args)
 
-    context_threshold = args.context_threshold
-    context_limit = args.context_limit
+    contexts = args.context
 
     if args.provider_type != "auto-group":
         # Single-provider mode: openai-compatible / bailian / dashscope all produce one
@@ -1169,8 +1208,7 @@ def build_provider_fragment(
                 match,
                 args.variant_policy,
                 args.provider_type,
-                context_threshold,
-                context_limit,
+                contexts,
             )
             for mid, config, report in results:
                 generated[mid] = config
@@ -1207,8 +1245,7 @@ def build_provider_fragment(
                 match,
                 args.variant_policy,
                 "openai-compatible",
-                context_threshold,
-                context_limit,
+                contexts,
             )
             for mid, config, report in results:
                 group_generated[mid] = config
@@ -1440,8 +1477,7 @@ def make_report(
         "provider": args.provider,
         "provider_groups": provider_groups,
         "variant_policy": args.variant_policy,
-        "context_threshold": args.context_threshold,
-        "context_limit": args.context_limit if args.context_limit > 0 else args.context_threshold,
+        "contexts": list(args.context),
         "summary": counts,
         "models": model_reports,
     }

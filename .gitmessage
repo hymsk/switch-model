@@ -1,0 +1,22 @@
+# <type>[(<scope>)][!]: <imperative summary, 72 characters or fewer>
+#
+# Why is this change needed? What was wrong or missing before?
+#
+# What behavior or implementation changed? What user, configuration, or
+# compatibility impact follows? Wrap prose at 72 characters.
+#
+# BREAKING CHANGE: <incompatible behavior and executable migration path>
+# Fixes #<issue>
+# Refs #<issue-or-pull-request>
+#
+# Header: <type>[(<scope>)][!]: <summary>
+#
+# Types: feat (feature), fix (bug fix), docs (documentation), test (tests),
+# refactor (no behavior change), perf (performance), build (build/dependencies),
+# ci (CI configuration), chore (maintenance), revert (revert a commit).
+#
+# Use a lowercase English type; use an imperative, lowercase English summary;
+# do not add a period, emoji, WIP, fixup!, squash!, issue reference, or result.
+# Add ! and BREAKING CHANGE: when changing public behavior incompatibly.
+# Use only verified issue references and trailers; never fabricate validation,
+# review, sign-off, authorship, or AI trailers.

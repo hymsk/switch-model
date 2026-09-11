@@ -15,6 +15,107 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
+class ProviderPreferenceTest(unittest.TestCase):
+    def entry(self, provider, model, **metadata):
+        return MODULE.CatalogEntry(f"{provider}/{model}", {
+            "id": model, "providerID": provider, **metadata,
+        })
+
+    def test_origin_beats_explicit_reseller_for_each_family(self):
+        for model, origin in (
+            ("gpt-5.4", "openai"), ("deepseek-v4-flash", "deepseek"),
+            ("kimi-k2.7", "moonshotai"), ("glm-5.3", "zhipuai"),
+            ("qwen3.7-plus", "alibaba"), ("claude-opus-4", "anthropic"),
+            ("gemini-3-pro", "google"), ("minimax-m3", "minimax"),
+        ):
+            with self.subTest(model=model):
+                official = self.entry(origin, model)
+                reseller = self.entry("opencode", model, status="active",
+                    limit={"context": 1000000, "input": 900000, "output": 100000},
+                    capabilities={"reasoning": True, "toolcall": True},
+                    variants={"low": {}, "high": {}})
+                for prefix in ("opencode", "zen", "alibaba"):
+                    selected, _ = MODULE.select_entry(f"{prefix}/{model}",
+                        [reseller, self.entry("alibaba-cn", model), official], None)
+                    self.assertEqual(official, selected)
+
+    def test_alibaba_beats_other_channels_without_origin(self):
+        for model in ("deepseek-v4.1-flash", "unknown-1"):
+            cloud = self.entry("alibaba-cn", model)
+            other = self.entry("hyper", model, limit={"context": 200000})
+            selected, _ = MODULE.select_entry(f"hyper/{model}", [other, cloud], None)
+            self.assertEqual(cloud, selected)
+
+    def test_precision_and_version_are_not_overridden_by_origin(self):
+        exact = self.entry("hyper", "deepseek-v4.1-flash")
+        for model in ("deepseek-v4-1-flash", "deepseek-v4", "deepseek-v3"):
+            selected, _ = MODULE.select_entry("deepseek-v4.1-flash",
+                [self.entry("deepseek", model), exact], None)
+            self.assertEqual(exact, selected)
+
+    def test_mapping_can_pin_reseller(self):
+        other = self.entry("hyper", "deepseek-v4-flash")
+        selected, match = MODULE.select_entry("deepseek-v4-flash",
+            [other, self.entry("deepseek", "deepseek-v4-flash")], other.full_id)
+        self.assertEqual(other, selected)
+        self.assertEqual("mapped", match["status"])
+
+    def test_v41_flash_alias_overrides_exact_match(self):
+        official = self.entry("deepseek", "deepseek-flash", limit={"context": 1000000, "output": 384000})
+        old_version = self.entry("deepseek", "deepseek-v4-flash")
+        reseller = self.entry("hyper", "deepseek-v4.1-flash", status="active")
+        for model in ("deepseek-v4.1-flash", "workbuddy/deepseek-v4.1-flash", "Hyper/DeepSeek-V4.1-Flash"):
+            with self.subTest(model=model):
+                selected, match = MODULE.select_entry(model, [old_version, reseller, official], None)
+                self.assertEqual(official, selected)
+                self.assertEqual("mapped", match["status"])
+                self.assertEqual("official-flash-alias", match["match_rule"])
+                generated = MODULE.model_config_from_entry({"id": model}, selected, match, "translate", contexts=(0,))
+                self.assertEqual(model, generated[0][0])
+                self.assertEqual(official.data["limit"], generated[0][1]["limit"])
+        selected, match = MODULE.select_entry("deepseek-v4.1-flash", [official, reseller], reseller.full_id)
+        self.assertEqual(reseller, selected)
+        self.assertEqual("mapping-file", match["match_rule"])
+
+    def test_v41_flash_alias_missing_origin_and_scope(self):
+        reseller = self.entry("hyper", "deepseek-v4.1-flash")
+        old_version = self.entry("deepseek", "deepseek-v4-flash")
+        selected, match = MODULE.select_entry("deepseek-v4.1-flash", [old_version, reseller], None)
+        self.assertEqual(reseller, selected)
+        self.assertEqual("matched", match["status"])
+        official = self.entry("deepseek", "deepseek-flash")
+        for model in ("deepseek-v4.1-pro", "deepseek-v4.2-flash"):
+            selected, _ = MODULE.select_entry(model, [official], None)
+            self.assertIsNone(selected)
+
+    def test_api_id_can_select_official(self):
+        official = self.entry("deepseek", "deepseek-chat", api={"id": "deepseek-v4"})
+        selected, _ = MODULE.select_entry("hyper/deepseek-v4",
+            [self.entry("hyper", "deepseek-v4"), official], None)
+        self.assertEqual(official, selected)
+
+    def test_fallback_prefers_cloud_but_preserves_specificity(self):
+        cloud = self.entry("alibaba", "deepseek-v4")
+        reseller = self.entry("hyper", "deepseek-v4")
+        selected, match = MODULE.select_entry("hyper/deepseek-v4-flash-local", [reseller, cloud], None)
+        self.assertEqual(cloud, selected)
+        self.assertEqual("guessed", match["status"])
+        specific = self.entry("hyper", "deepseek-v4-flash")
+        selected, _ = MODULE.select_entry("deepseek-v4-flash-local", [cloud, specific], None)
+        self.assertEqual(specific, selected)
+
+    def test_false_capability_is_as_complete_as_true(self):
+        yes = self.entry("hyper", "model", capabilities={"reasoning": True, "toolcall": True})
+        no = self.entry("hyper", "model", capabilities={"reasoning": False, "toolcall": False})
+        self.assertEqual(MODULE.metadata_completeness(yes), MODULE.metadata_completeness(no))
+
+    def test_v_version_fallback_does_not_cross_version(self):
+        selected, match = MODULE.select_entry("deepseek-v4-local",
+            [self.entry("deepseek", "deepseek-v3")], None)
+        self.assertIsNone(selected)
+        self.assertEqual("unmatched", match["status"])
+
+
 class PrefixFallbackTest(unittest.TestCase):
     def setUp(self):
         self.glm52 = MODULE.CatalogEntry(

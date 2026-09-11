@@ -97,18 +97,24 @@ opencode models --refresh --pure
 | 状态 | 含义 |
 | --- | --- |
 | `matched` | 唯一命中，继承完整 limit、capabilities 和 variants |
-| `mapped` | 由 `--mapping-file` 显式指定 |
+| `mapped` | 由 `--mapping-file` 显式指定，或命中内置原厂别名 |
 | `guessed` | 精确匹配失败后按前缀族回退 |
 | `ambiguous` | 多个候选同分且元数据不同，取排序第一项兜底 |
 | `unmatched` | catalog 中不存在，不生成 limit |
 
 `ambiguous` 会在报告中保留全部竞争候选、实际选中的来源和提示 `--mapping-file` 的警告；`--strict` 仍将其视为不完整。需要固定某个来源时使用映射文件：
 
+默认评分先比较模型身份：精确 model/full/API ID（400）> 标点归一化（300）> Zen free 别名（200）> effort 基础模型（100）。同一精度内优先模型原厂（如 OpenAI、DeepSeek、Moonshot AI、智谱），其次 Alibaba / Alibaba CN，最后其他渠道；远端 ID 中的渠道前缀不再获得优先权。原厂加 60 分、后续原厂区域加 50 分，Alibaba 加 30 分、Alibaba CN 加 20 分；Qwen 的原厂就是 Alibaba。元数据完整度最多加 7 分，active 加 1 分，不以窗口大小或是否支持推理衡量渠道质量。前缀回退先保留最长的同版本前缀，再使用相同渠道优先级。显式映射始终优先。
+
+这些规则选择的是 **catalog 元数据来源**，不是 API 网络路由。请求仍发送到配置的 `baseURL`，模型 ID 保持不变；不会验证或改变网关内部的上游渠道。原厂 limit 也不保证中转服务支持相同窗口。同分且元数据不同仍保留 `ambiguous` 提示，不宣称已找到实测最佳渠道。
+
 ```json
 {
   "workbuddy/deepseek-v4.1-flash": "opencode-go/deepseek-v4.1-flash"
 }
 ```
+
+内置别名：`deepseek-v4.1-flash`（含渠道前缀、忽略大小写）优先映射到 `deepseek/deepseek-flash`（原厂显示名称为 DeepSeek V4.1 Flash），高于普通评分，报告规则为 `official-flash-alias`。这是同一模型的 ID 别名，不是回退到旧版 `deepseek-v4-flash`。仅继承元数据，不修改远端模型 ID；显式 `--mapping-file` 仍优先。原厂条目不存在时恢复普通匹配，不扩展到其他版本或 Pro 模型。
 
 ## 配置影响
 

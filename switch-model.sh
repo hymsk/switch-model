@@ -1039,9 +1039,6 @@ def split_effort_suffix(model_id: str) -> Tuple[str, Optional[str]]:
 
 def preferred_providers(model_id: str) -> List[str]:
     lowered = strip_provider_prefix(model_id).lower()
-    explicit = model_id.split("/", 1)[0].lower() if "/" in model_id else ""
-    if explicit == "zen":
-        explicit = "opencode"
     rules = (
         (("gpt-", "chatgpt-", "o1", "o3", "o4", "codex"), ["openai"]),
         (("claude-",), ["anthropic"]),
@@ -1058,11 +1055,25 @@ def preferred_providers(model_id: str) -> List[str]:
         (("step-",), ["stepfun", "stepfun-ai"]),
         (("longcat-",), ["longcat"]),
     )
-    result = [explicit] if explicit else []
+    # A gateway prefix is not an instruction to trust that reseller's metadata.
+    result: List[str] = []
     for prefixes, providers in rules:
         if lowered.startswith(prefixes):
             result.extend(providers)
-    return list(dict.fromkeys(provider for provider in result if provider))
+    result.extend(["alibaba", "alibaba-cn"])
+    return list(dict.fromkeys(result))
+
+
+def provider_preference(model_id: str, entry: CatalogEntry) -> int:
+    preferred = preferred_providers(model_id)
+    provider = entry.provider_id.lower()
+    if provider not in preferred:
+        return 0
+    # Keep regional defaults stable, with cloud fallback below every origin.
+    origins = [item for item in preferred if item not in ("alibaba", "alibaba-cn")]
+    if provider in origins:
+        return 60 - origins.index(provider) * 10
+    return 30 if provider == "alibaba" else 20
 
 
 def metadata_completeness(entry: CatalogEntry) -> int:
@@ -1072,7 +1083,8 @@ def metadata_completeness(entry: CatalogEntry) -> int:
     capabilities = capabilities if isinstance(capabilities, dict) else {}
     variants = entry.data.get("variants", {})
     score = sum(1 for key in ("context", "input", "output") if isinstance(limit.get(key), int) and limit[key] > 0)
-    score += int(bool(capabilities.get("reasoning")))
+    # Explicit false is useful metadata too; reasoning is not a quality score.
+    score += sum(isinstance(capabilities.get(key), bool) for key in ("reasoning", "toolcall"))
     score += min(2, len(variants) if isinstance(variants, dict) else 0)
     return score
 
@@ -1089,29 +1101,27 @@ def score_entry(model_id: str, entry: CatalogEntry) -> Tuple[int, str, Optional[
     score = 0
     rule = "none"
     if raw == full_id:
-        score, rule = 220, "full-id-exact"
+        score, rule = 400, "full-id-exact"
     elif raw == source_id:
-        score, rule = 200, "model-id-exact"
+        score, rule = 400, "model-id-exact"
     elif raw_without_provider == source_id:
-        score, rule = 195, "provider-prefix-stripped"
+        score, rule = 400, "provider-prefix-stripped"
     elif api_id and raw_without_provider == api_id:
-        score, rule = 190, "api-id-exact"
+        score, rule = 400, "api-id-exact"
     elif normalized_id(raw_without_provider) == normalized_id(source_id):
-        score, rule = 170, "normalized-id"
+        score, rule = 300, "normalized-id"
     elif (
         explicit_provider == "zen"
         and entry.provider_id == "opencode"
         and normalized_id(f"{raw_without_provider}-free") == normalized_id(source_id)
     ):
-        score, rule = 180, "zen-free-alias"
+        score, rule = 200, "zen-free-alias"
     elif effort and normalized_id(base_id) == normalized_id(source_id):
-        score, rule = 150, "effort-base"
+        score, rule = 100, "effort-base"
     if not score:
         return 0, rule, effort
-    preferred = preferred_providers(model_id)
-    if entry.provider_id in preferred:
-        # Provider preference must remain stronger than catalog metadata variance.
-        score += 30 - min(20, preferred.index(entry.provider_id) * 10)
+    # Identity tiers (100) > source preference (60) > completeness (7) + active (1).
+    score += provider_preference(model_id, entry)
     score += metadata_completeness(entry)
     if entry.data.get("status") == "active":
         score += 1
@@ -1180,18 +1190,18 @@ def model_id_segments(value: str) -> List[str]:
 def prefix_fallback_entries(model_id: str, entries: List[CatalogEntry]) -> List[Tuple[int, int, int, CatalogEntry]]:
     """Find catalog IDs that safely preserve a custom model's family and version prefix."""
     target_segments = model_id_segments(model_id)
-    preferred = preferred_providers(model_id)
     candidates: List[Tuple[int, int, int, CatalogEntry]] = []
     for entry in entries:
         candidate_segments = model_id_segments(entry.model_id)
         if len(candidate_segments) < 2 or len(candidate_segments) >= len(target_segments):
             continue
-        if not candidate_segments[1][0].isdigit():
+        if not re.match(r"v?\d", candidate_segments[1]):
             continue
         if target_segments[: len(candidate_segments)] != candidate_segments:
             continue
-        provider_rank = preferred.index(entry.provider_id) if entry.provider_id in preferred else len(preferred)
-        candidates.append((len(candidate_segments), provider_rank, metadata_completeness(entry), entry))
+        provider_rank = -provider_preference(model_id, entry)
+        quality = metadata_completeness(entry) + int(entry.data.get("status") == "active")
+        candidates.append((len(candidate_segments), provider_rank, quality, entry))
     return candidates
 
 
@@ -1215,6 +1225,22 @@ def select_entry(
             "candidates": [entry.full_id for entry in matches[:10]],
             "warnings": [f"mapping target not unique or missing: {explicit_mapping}"],
         }
+
+    # The official V4.1 Flash catalog ID omits the version; user mappings win.
+    if strip_provider_prefix(model_id).lower() == "deepseek-v4.1-flash":
+        official = next(
+            (entry for entry in entries if entry.full_id.lower() == "deepseek/deepseek-flash"),
+            None,
+        )
+        if official is not None:
+            return official, {
+                "status": "mapped",
+                "match_rule": "official-flash-alias",
+                "score": 1000,
+                "selected": official.full_id,
+                "candidates": [],
+                "warnings": ["deepseek-v4.1-flash inherits official deepseek-flash metadata; upstream model ID is unchanged"],
+            }
 
     scored: List[Tuple[int, str, Optional[str], CatalogEntry]] = []
     for entry in entries:

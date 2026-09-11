@@ -82,6 +82,34 @@ OpenCode 还支持：
 
 `--context` 仅接受单个上下文长度：`258000`、`258k` 或 `258K`。不支持逗号分隔、千位分隔或多个值。`0` 表示不生成上下文子模式。
 
+### Catalog 与模型匹配
+
+写入前先刷新本地 OpenCode catalog，使匹配基于当前发布的模型目录：
+
+```bash
+opencode models --refresh --pure
+```
+
+刷新失败只警告并继续使用现有 cache，离线环境仍可运行。设置 `OPENCODE_CATALOG_REFRESH=false` 可跳过刷新。Catalog 运行时顺序为：刷新本地 cache -> 本地 cache -> 内嵌完整 snapshot -> 实时查询。
+
+每个远端模型按以下状态之一匹配到 catalog 条目：
+
+| 状态 | 含义 |
+| --- | --- |
+| `matched` | 唯一命中，继承完整 limit、capabilities 和 variants |
+| `mapped` | 由 `--mapping-file` 显式指定 |
+| `guessed` | 精确匹配失败后按前缀族回退 |
+| `ambiguous` | 多个候选同分且元数据不同，取排序第一项兜底 |
+| `unmatched` | catalog 中不存在，不生成 limit |
+
+`ambiguous` 会在报告中保留全部竞争候选、实际选中的来源和提示 `--mapping-file` 的警告；`--strict` 仍将其视为不完整。需要固定某个来源时使用映射文件：
+
+```json
+{
+  "workbuddy/deepseek-v4.1-flash": "opencode-go/deepseek-v4.1-flash"
+}
+```
+
 ## 配置影响
 
 | 模式 | 读取 | 写入 |
@@ -107,7 +135,7 @@ bash build.sh
 OPENCODE_MODELS_FILE=/path/to/reviewed-models.json bash build.sh
 ```
 
-构建不会运行 `opencode models --refresh`。
+构建不会运行 `opencode models --refresh`。刷新只在运行时发生，即用户实际执行 `switch-model.sh opencode` 时。
 
 ## 验证
 

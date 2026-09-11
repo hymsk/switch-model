@@ -18,13 +18,12 @@ fetch_bearer_json() {
         return 1
     fi
 
-    local header_file
-    header_file=$(mktemp "${TMPDIR:-/tmp}/switch-model-header.XXXXXX") || return 1
-    trap 'rm -f -- "$header_file"' RETURN
-    chmod 600 "$header_file" 2>/dev/null || true
-    printf 'Authorization: Bearer %s\n' "$api_key" > "$header_file"
-    curl --fail --silent --show-error --location \
-        --header "@$header_file" "$url" 2>/dev/null
+    # 通过 stdin 把认证头交给 curl（--config -），既不在磁盘留下凭据文件，
+    # 也不让 API Key 出现在进程参数列表中。
+    local escaped_key
+    escaped_key=$(printf '%s' "$api_key" | sed 's/[\\"]/\\&/g')
+    printf 'header = "Authorization: Bearer %s"\n' "$escaped_key" \
+        | curl --fail --silent --show-error --location --config - "$url" 2>/dev/null
 }
 
 # 获取模型列表

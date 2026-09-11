@@ -18,7 +18,8 @@ usage() {
     echo "  --preview               预览模式，只输出配置文件位置与内容，不实际写入"
     echo ""
     echo "OpenCode Options:"
-    echo "  --context <tokens>              上下文子模式，仅支持 258000 / 258k / 258K（默认: $DEFAULT_CONTEXT；0 表示禁用）"
+    echo "  provider                         OpenCode provider 名称；也可写入 $DEFAULT_PROVIDER_FILE（默认: $DEFAULT_OPENCODE_PROVIDER）"
+    echo "  --context <tokens>              上下文子模式，支持逗号分隔多个值（如 258000、258k、258000,128000；0 表示禁用；默认: $DEFAULT_CONTEXT）"
     echo "  --mapping-file <path>            显式模型 ID 到 OpenCode catalog ID 的 JSON 映射（默认: $DEFAULT_OPENCODE_MAPPING_FILE）"
     echo "  --no-prefix-fallback             关闭仅在精确匹配失败后启用的安全前缀元数据回退"
     echo "  Catalog 运行时顺序: 刷新本地 cache -> 本地 cache -> 内嵌完整 snapshot -> 实时查询"
@@ -68,17 +69,32 @@ def fail(message):
     raise SystemExit(1)
 
 
-token = sys.argv[1].strip()
-if not token:
+def parse_token(token):
+    if re.fullmatch(r"[0-9]+[kK]", token):
+        return int(token[:-1]) * 1000
+    if re.fullmatch(r"[0-9]+", token):
+        return int(token)
+    fail("only supports values such as 258000, 258k, 258K, or 258000,128000")
+
+
+text = sys.argv[1].strip()
+if not text:
     fail("must contain at least one value")
 
-if re.fullmatch(r"[0-9]+[kK]", token):
-    context = int(token[:-1]) * 1000
-elif re.fullmatch(r"[0-9]+", token):
-    context = int(token)
-else:
-    fail("only supports values such as 258000, 258k, or 258K")
-print(context)
+# Reject thousands separators such as 258,000: comma is the value separator,
+# so this input would otherwise silently parse as two separate windows.
+if re.fullmatch(r"[0-9]{1,3}(,[0-9]{3})+[kK]?", text):
+    fail("does not accept thousands separators; write 258000 instead of 258,000")
+
+contexts = []
+for token in text.split(","):
+    token = token.strip()
+    if not token:
+        fail("must not contain empty values")
+    context = parse_token(token)
+    if context not in contexts:
+        contexts.append(context)
+print(",".join(str(context) for context in contexts))
 PYEOF
 }
 
@@ -189,6 +205,9 @@ if [ -z "${1:-$DEFAULT_API_URL}" ]; then
     echo -e "${RED}Error: 必须提供模型服务 URL，或写入 $DEFAULT_URL_FILE / 设置 SWITCH_MODEL_BASE_URL${NC}" >&2
     usage
 fi
+
+# 默认 provider 名称来自文件，命令行位置参数优先。
+read_default_provider_file || usage
 
 # 检查 JSON 处理工具
 if ! check_json_tool; then

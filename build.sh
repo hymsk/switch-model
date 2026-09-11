@@ -7,6 +7,7 @@ OUTPUT="$SCRIPT_DIR/switch-model.sh"
 BUILD_OUTPUT="$(mktemp "$SCRIPT_DIR/.switch-model.sh.XXXXXX")"
 SHELL_DIR="$SCRIPT_DIR/shell"
 PYTHON_DIR="$SCRIPT_DIR/python"
+VERSION_FILE="$SCRIPT_DIR/VERSION"
 OPENCODE_MODELS_FILE="${OPENCODE_MODELS_FILE:-}"
 CATALOG_TEMP=""
 
@@ -212,6 +213,15 @@ print("EMBEDDED_OPENCODE_MODELS_GZIP = " + repr(encoded))
 PYEOF
 }
 
+append_generator_version() {
+    python3 - "$VERSION_FILE" >> "$BUILD_OUTPUT" <<'PYEOF'
+import sys
+from pathlib import Path
+
+print("GENERATOR_VERSION = " + repr(Path(sys.argv[1]).read_text(encoding="utf-8").strip()))
+PYEOF
+}
+
 catalog_sha256() {
     python3 - "$OPENCODE_MODELS_FILE" <<'PYEOF'
 import hashlib
@@ -289,6 +299,7 @@ for py_file in "$PYTHON_DIR"/*.py; do
                 printf '%s\n' "$line" >> "$BUILD_OUTPUT"
                 if [ "$line" = "from __future__ import annotations" ]; then
                     append_embedded_opencode_catalog
+                    append_generator_version
                 fi
             done < "$py_file"
         else

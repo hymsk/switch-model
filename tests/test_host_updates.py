@@ -31,9 +31,9 @@ class HostUpdateTests(unittest.TestCase):
             content = config.read_text(encoding="utf-8")
 
         self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertIn('model_provider = "newapi"', content)
+        self.assertIn('model_provider = "MyProvider"', content)
         self.assertIn('model = "example-model"', content)
-        self.assertIn('[model_providers.newapi]', content)
+        self.assertIn('[model_providers.MyProvider]', content)
         self.assertIn('base_url = "https://api.example.com/v1"', content)
         self.assertIn('approval_policy = "on-request"', content)
 

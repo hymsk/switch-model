@@ -92,3 +92,26 @@ read_default_url_file() {
         return 1
     fi
 }
+
+# 从默认 provider 文件读取 provider 名称；文件不存在时由调用方决定是否报错。
+read_default_provider_file() {
+    local file="${1:-$DEFAULT_PROVIDER_FILE}"
+    if [ ! -e "$file" ]; then
+        return 0
+    fi
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Error: 默认 provider 路径不是文件: $file${NC}" >&2
+        return 1
+    fi
+    if [ ! -r "$file" ]; then
+        echo -e "${RED}Error: 默认 provider 文件不可读: $file${NC}" >&2
+        return 1
+    fi
+
+    DEFAULT_OPENCODE_PROVIDER=$(tr -d '[:space:]' < "$file")
+    if [ -z "$DEFAULT_OPENCODE_PROVIDER" ]; then
+        echo -e "${RED}Error: 默认 provider 文件为空: $file${NC}" >&2
+        return 1
+    fi
+    DEFAULT_OPENCODE_PROVIDER_NAME="$DEFAULT_OPENCODE_PROVIDER"
+}

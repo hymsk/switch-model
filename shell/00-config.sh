@@ -21,6 +21,10 @@ DEFAULT_SK_FILENAME="default.sk"
 DEFAULT_URL_FILENAME="default.url"
 DEFAULT_URL_FILE="$DEFAULT_SK_DIR/$DEFAULT_URL_FILENAME"
 
+# 默认 provider 名称文件名（不含路径）；内容作为 OpenCode provider 名称
+DEFAULT_PROVIDER_FILENAME="default.provider"
+DEFAULT_PROVIDER_FILE="$DEFAULT_SK_DIR/$DEFAULT_PROVIDER_FILENAME"
+
 # API 提供商 URL；环境变量优先于默认 URL 文件。
 DEFAULT_API_URL="${SWITCH_MODEL_BASE_URL:-}"
 
@@ -31,10 +35,10 @@ DEFAULT_CLAUDE_MODEL="opus"
 DEFAULT_CODEX_MODEL="gpt-5.5"
 
 # OpenCode 默认 provider ID
-DEFAULT_OPENCODE_PROVIDER="newapi"
+DEFAULT_OPENCODE_PROVIDER="MyProvider"
 
 # OpenCode 默认 provider 名称
-DEFAULT_OPENCODE_PROVIDER_NAME="New API"
+DEFAULT_OPENCODE_PROVIDER_NAME="MyProvider"
 
 # OpenCode 上下文子模式列表（逗号分隔，0 表示不生成子模式）
 # 超过指定值的模型会保留原版本，并为每个适用值生成限制版本

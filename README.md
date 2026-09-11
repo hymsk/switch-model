@@ -28,6 +28,16 @@ https://api.example.com
 
 设置后可省略命令行 URL。优先级为命令行 URL、`SWITCH_MODEL_BASE_URL`、`~/.config/api-keys/default.url`。
 
+## Provider 名称
+
+OpenCode 与 Codex 的默认 provider ID 和显示名称均为 `MyProvider`。可将默认 OpenCode provider 名称写入 `~/.config/api-keys/default.provider`，文件仅包含一行名称：
+
+```text
+CompanyGateway
+```
+
+优先级为命令行位置参数、`~/.config/api-keys/default.provider`、内置默认值 `MyProvider`。文件存在时，其内容同时用作 provider ID 和显示名称。
+
 ## API Key
 
 默认读取：
@@ -43,6 +53,8 @@ bash switch-model.sh claude https://api.example.com --sk-file ~/.config/api-keys
 ```
 
 API Key 文件建议使用 `0600` 权限。Preview 和错误输出不会显示 Key 或 Key 前缀。
+
+请求模型列表时，API Key 通过 `curl --config -` 从 stdin 传入，既不写入临时文件，也不出现在进程参数列表中。
 
 Claude Code 和 Codex 的目标配置会保存实际 Key；其备份也包含 Key。OpenCode 默认写入 `{file:...}` 引用，不把 Key 值写入主配置。
 
@@ -72,15 +84,17 @@ bash switch-model.sh opencode https://api.example.com --preview
 bash switch-model.sh opencode https://api.example.com
 ```
 
+> **注意**：写入会替换 `opencode.json` 中的整个 `provider` 对象。原有其他 provider（例如 `anthropic`、`openai`）不会被保留，只写入本次同步生成的 provider。写入前会创建带时间戳的备份。
+
 OpenCode 还支持：
 
 ```text
---context <tokens>
+--context <tokens>[,<tokens>...]
 --mapping-file <path>
 --no-prefix-fallback
 ```
 
-`--context` 仅接受单个上下文长度：`258000`、`258k` 或 `258K`。不支持逗号分隔、千位分隔或多个值。`0` 表示不生成上下文子模式。
+`--context` 接受一个或多个逗号分隔的上下文长度：`258000`、`258k` 或 `258K`。每个小于模型原生窗口的值都会生成一个 capped 子模式；重复值会合并。不接受千位分隔（`258,000`）。`0` 表示不生成上下文子模式。
 
 ### Catalog 与模型匹配
 
@@ -91,6 +105,8 @@ opencode models --refresh --pure
 ```
 
 刷新失败只警告并继续使用现有 cache，离线环境仍可运行。设置 `OPENCODE_CATALOG_REFRESH=false` 可跳过刷新。Catalog 运行时顺序为：刷新本地 cache -> 本地 cache -> 内嵌完整 snapshot -> 实时查询。
+
+本地 cache 与内嵌 snapshot 使用同一套完整性校验：少于 10 个 provider、少于 100 个模型或普遍缺少 limit 的目录会被拒绝，并自动回退到下一个来源。这样截断或损坏的 cache 不会被静默当作完整目录使用。
 
 每个远端模型按以下状态之一匹配到 catalog 条目：
 
@@ -115,6 +131,22 @@ opencode models --refresh --pure
 ```
 
 内置别名：`deepseek-v4.1-flash`（含渠道前缀、忽略大小写）优先映射到 `deepseek/deepseek-flash`（原厂显示名称为 DeepSeek V4.1 Flash），高于普通评分，报告规则为 `official-flash-alias`。这是同一模型的 ID 别名，不是回退到旧版 `deepseek-v4-flash`。仅继承元数据，不修改远端模型 ID；显式 `--mapping-file` 仍优先。原厂条目不存在时恢复普通匹配，不扩展到其他版本或 Pro 模型。
+
+### Provider 类型与推理配置
+
+`--provider-type` 决定 npm 包和推理参数的表达方式：
+
+| 类型 | npm 包 | 推理配置 |
+| --- | --- | --- |
+| `openai-compatible` | `@ai-sdk/openai-compatible` | 模型级 `variants`，使用 `reasoningEffort` |
+| `bailian` / `dashscope` | `@ai-sdk/alibaba` | provider 级 `enableThinking` / `thinkingBudget` |
+| `auto-group` | 按 catalog providerID 决定 | 每个分组使用 `openai-compatible` 语义 |
+
+阿里云系模型（`alibaba`、`alibaba-cn`）用「开关」和「token 预算」描述思考能力，没有 `low`/`medium`/`high` 档位，因此 `bailian`/`dashscope` 模式不输出 `reasoningEffort` variants，而是生成：
+
+- `reasoning_options` 含 `toggle` → `enableThinking: true`
+- `reasoning_options` 含带数值 `max` 的 `budget_tokens` → `enableThinking: true` 和 `thinkingBudget: <max>`
+- `budget_tokens` 无数值 `max` → 回退为 `enableThinking: true` 并记录警告
 
 ## 配置影响
 

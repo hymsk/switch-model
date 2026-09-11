@@ -28,14 +28,14 @@ def main():
 
         # 如果文件不存在，创建默认配置（使用 LF 换行符）
         if not os.path.exists(filepath):
-            default_config = 'model_provider = "newapi"\n'
+            default_config = 'model_provider = "MyProvider"\n'
             default_config += 'model = "{model}"\n'
             default_config += 'model_reasoning_effort = "high"\n'
             default_config += 'disable_response_storage = true\n'
             default_config += 'personality = "pragmatic"\n'
             default_config += '\n'
-            default_config += '[model_providers.newapi]\n'
-            default_config += 'name = "NewAPI"\n'
+            default_config += '[model_providers.MyProvider]\n'
+            default_config += 'name = "MyProvider"\n'
             default_config += 'base_url = "{url}/v1"\n'
             default_config += 'wire_api = "responses"\n'
             default_config += 'requires_openai_auth = true\n'
@@ -53,7 +53,7 @@ def main():
 
         # 更新配置
         new_lines = []
-        in_newapi_section = False
+        in_myprovider_section = False
         model_provider_updated = False
         model_updated = False
         base_url_updated = False
@@ -63,7 +63,7 @@ def main():
 
             # 更新 model_provider 行
             if stripped.startswith('model_provider = ') and not model_provider_updated:
-                new_lines.append('model_provider = "newapi"')
+                new_lines.append('model_provider = "MyProvider"')
                 model_provider_updated = True
                 continue
 
@@ -73,36 +73,36 @@ def main():
                 model_updated = True
                 continue
 
-            # 进入 newapi section
-            if stripped.startswith('[model_providers.newapi]'):
-                in_newapi_section = True
+            # 进入 MyProvider section
+            if stripped.startswith('[model_providers.MyProvider]'):
+                in_myprovider_section = True
                 new_lines.append(line)
                 continue
 
-            # 在 newapi section 中更新 base_url
-            if in_newapi_section and stripped.startswith('base_url = ') and not base_url_updated:
+            # 在 MyProvider section 中更新 base_url
+            if in_myprovider_section and stripped.startswith('base_url = ') and not base_url_updated:
                 new_lines.append('base_url = "{0}/v1"'.format(url))
                 base_url_updated = True
                 continue
 
-            # 离开 newapi section
-            if in_newapi_section and stripped.startswith('[') and not stripped.startswith('[model_providers.newapi]'):
-                in_newapi_section = False
+            # 离开 MyProvider section
+            if in_myprovider_section and stripped.startswith('[') and not stripped.startswith('[model_providers.MyProvider]'):
+                in_myprovider_section = False
 
             new_lines.append(line)
 
         if not model_provider_updated:
-            new_lines.insert(0, 'model_provider = "newapi"')
+            new_lines.insert(0, 'model_provider = "MyProvider"')
         if not model_updated:
             insert_at = 1 if new_lines and new_lines[0].startswith('model_provider = ') else 0
             new_lines.insert(insert_at, 'model = "{0}"'.format(model))
         if not base_url_updated:
             if new_lines and new_lines[-1] != '':
                 new_lines.append('')
-            if not any(line.strip() == '[model_providers.newapi]' for line in new_lines):
+            if not any(line.strip() == '[model_providers.MyProvider]' for line in new_lines):
                 new_lines.extend([
-                    '[model_providers.newapi]',
-                    'name = "NewAPI"',
+                    '[model_providers.MyProvider]',
+                    'name = "MyProvider"',
                     'base_url = "{0}/v1"'.format(url),
                     'wire_api = "responses"',
                     'requires_openai_auth = true',
@@ -111,7 +111,7 @@ def main():
                 section_index = next(
                     index
                     for index, line in enumerate(new_lines)
-                    if line.strip() == '[model_providers.newapi]'
+                    if line.strip() == '[model_providers.MyProvider]'
                 )
                 new_lines.insert(section_index + 1, 'base_url = "{0}/v1"'.format(url))
 

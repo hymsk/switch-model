@@ -7,6 +7,7 @@
 ## Security Model
 
 - API Key 只从显式文件读取，并通过环境变量或标准输入边界传递给 Python 子进程。
+- 请求模型列表时认证头经 stdin 传给 `curl --config -`，不写入临时文件，也不出现在进程参数列表中。
 - Preview 不显示 Key 或 Key 前缀。
 - Claude Code 和 Codex 配置及其备份可能包含明文 Key。
 - OpenCode 写入会先创建配置备份，再替换整个 `provider` 对象。

@@ -1,5 +1,6 @@
 import importlib.util
 from argparse import Namespace
+import json
 import os
 import shutil
 import subprocess
@@ -36,7 +37,7 @@ class SwitchModelSafetyTests(unittest.TestCase):
         self.assertIn('DEFAULT_URL_FILENAME="default.url"', generated)
         self.assertIn('DEFAULT_URL_FILE="$DEFAULT_SK_DIR/$DEFAULT_URL_FILENAME"', generated)
         self.assertIn('DEFAULT_API_URL="${SWITCH_MODEL_BASE_URL:-}"', generated)
-        self.assertIn('DEFAULT_OPENCODE_PROVIDER="newapi"', generated)
+        self.assertIn('DEFAULT_OPENCODE_PROVIDER="MyProvider"', generated)
         self.assertNotIn("${sk:0:10}", generated)
         self.assertIn('"<redacted>"', generated)
 
@@ -44,6 +45,73 @@ class SwitchModelSafetyTests(unittest.TestCase):
         build = (ROOT / "build.sh").read_text(encoding="utf-8")
         self.assertIn("git -C \"$SCRIPT_DIR\" show HEAD:switch-model.sh", build)
         self.assertNotIn("grep -q '^# OpenCode catalog SHA256:", build)
+
+    def test_generated_model_fetch_never_writes_api_key_to_disk(self):
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, remainder = generated.partition("# === 03-model-fetch.sh ===")
+        self.assertTrue(marker, "generated script must retain the model-fetch boundary")
+        module = remainder.split("# === 04-claude.sh ===")[0]
+
+        # The key must travel through stdin to curl, not through a temp file.
+        self.assertIn("--config -", module)
+        self.assertNotIn("switch-model-header", module)
+        self.assertNotIn('--header "@', module)
+
+    def test_model_fetch_passes_key_without_residue(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, remainder = generated.partition("# === 03-model-fetch.sh ===")
+        self.assertTrue(marker, "generated script must retain the model-fetch boundary")
+        module = remainder.split("# === 04-claude.sh ===")[0]
+
+        # Intercept curl to capture the config fed on stdin.
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            captured = directory_path / "captured-config.txt"
+            fake_curl = directory_path / "curl"
+            fake_curl.write_text(
+                "#!/bin/bash\ncat > \"$CAPTURE_FILE\"\nprintf '{\"data\":[{\"id\":\"m\"}]}'\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+
+            harness = directory_path / "fetch.sh"
+            harness.write_text(
+                prefix + module + "\nfetch_bearer_json 'https://api.example.com/v1/models' \"$TEST_KEY\"\n",
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment["PATH"] = f"{directory_path}:{environment['PATH']}"
+            environment["CAPTURE_FILE"] = str(captured)
+            environment["TEST_KEY"] = 'sk-with"quote\\and-slash'
+
+            completed = subprocess.run(
+                (bash, str(harness)),
+                cwd=str(ROOT),
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue(captured.exists(), "curl must receive the config on stdin")
+            config_text = captured.read_text(encoding="utf-8")
+            self.assertIn("Authorization: Bearer", config_text)
+
+            # A syntactically broken config would make a real curl fail, so the
+            # escaping must survive quotes and backslashes.
+            self.assertIn('header = "', config_text)
+            self.assertEqual(1, config_text.count("\n"), config_text)
+
+        residue = sorted(Path(tempfile.gettempdir()).glob("switch-model-header.*"))
+        self.assertEqual([], residue, "no credential header file may be left in tmp")
 
     def test_generated_shell_has_no_provider_replacement_gate(self):
         generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
@@ -184,7 +252,7 @@ run_opencode_sync() {
 
 SK_FILE="$TEST_KEY_FILE"
 OPENCODE_CONFIG="$TEST_CONFIG_FILE"
-preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
+preview_opencode_config "https://api.example.com" "MyProvider" "MyProvider" "0"
 ''',
                 encoding="utf-8",
             )
@@ -390,7 +458,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
                 + main,
                 encoding="utf-8",
             )
-            for value in ("1,,2", "128k,258k", "258,000", "-1", "128x", "200kk"):
+            for value in ("1,,2", ",128k", "128k,", "258,000", "-1", "128x", "200kk"):
                 completed = subprocess.run(
                     (bash, str(harness), "opencode", "--context", value),
                     cwd=str(ROOT),
@@ -694,10 +762,76 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             with self.assertRaises(SystemExit):
                 OPENCODE_SYNC_MODULE.parse_args(["--conte", "200k"])
 
-    def test_context_argument_rejects_commas_and_invalid_values(self):
-        for value in ("", "1,,2", "128k,258k", "258,000", "-1", "128x", "200kk", "1,000,000"):
+    def test_context_argument_accepts_multiple_values(self):
+        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "258000,128000"])
+        self.assertEqual((258000, 128000), args.context)
+        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "258k,128k"])
+        self.assertEqual((258000, 128000), args.context)
+        # Duplicates collapse while preserving order.
+        args = OPENCODE_SYNC_MODULE.parse_args(["--context", "258000,258000,64k"])
+        self.assertEqual((258000, 64000), args.context)
+
+    def test_context_argument_rejects_invalid_values(self):
+        for value in ("", "1,,2", ",128k", "128k,", "258,000", "-1", "128x", "200kk", "1,000,000"):
             with self.assertRaises(OPENCODE_SYNC_MODULE.argparse.ArgumentTypeError):
                 OPENCODE_SYNC_MODULE.parse_contexts(value)
+
+    def test_context_generates_one_submode_per_value(self):
+        entry = OPENCODE_SYNC_MODULE.CatalogEntry(
+            full_id="openai/example-model",
+            data={
+                "id": "example-model",
+                "providerID": "openai",
+                "limit": {"context": 1000000, "input": 900000, "output": 32000},
+                "capabilities": {},
+            },
+        )
+        match = {"status": "matched", "match_rule": "exact", "score": 100, "candidates": []}
+
+        results = OPENCODE_SYNC_MODULE.model_config_from_entry(
+            {"id": "example-model"},
+            entry,
+            match,
+            "none",
+            contexts=(258000, 128000, 64000),
+        )
+
+        self.assertEqual(
+            [
+                "example-model",
+                "example-model (258k)",
+                "example-model (128k)",
+                "example-model (64k)",
+            ],
+            [model_id for model_id, _, _ in results],
+        )
+        # Every capped submode keeps the original upstream model ID.
+        for _, config, _ in results[1:]:
+            self.assertEqual("example-model", config["id"])
+        self.assertEqual(
+            [258000, 128000, 64000],
+            [config["limit"]["context"] for _, config, _ in results[1:]],
+        )
+        # Values at or above the native window are skipped, not expanded.
+        self.assertTrue(all(config["limit"]["context"] <= 1000000 for _, config, _ in results))
+
+    def test_local_cache_rejects_incomplete_catalog(self):
+        # A truncated cache must not be accepted just because it parses.
+        partial = {
+            "providers": {
+                "openai": {
+                    "models": {
+                        "gpt-4o": {"id": "gpt-4o", "limit": {"context": 128000}},
+                    }
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "models.json"
+            cache_path.write_text(json.dumps(partial), encoding="utf-8")
+            with self.assertRaises(OPENCODE_SYNC_MODULE.SyncError) as context:
+                OPENCODE_SYNC_MODULE.load_opencode_models_catalog(cache_path)
+        self.assertIn("incomplete", str(context.exception))
 
     def test_context_generates_limited_version(self):
         entry = OPENCODE_SYNC_MODULE.CatalogEntry(
@@ -817,10 +951,92 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
 
         self.assertEqual(["example-model"], [model_id for model_id, _, _ in results])
 
+    def test_alibaba_provider_options_translate_reasoning_options(self):
+        toggle_entry = OPENCODE_SYNC_MODULE.CatalogEntry(
+            "alibaba/qwen-max",
+            {
+                "id": "qwen-max",
+                "providerID": "alibaba",
+                "reasoning_options": [{"type": "toggle"}, {"type": "budget_tokens", "max": 262144}],
+            },
+        )
+        options, warnings = OPENCODE_SYNC_MODULE.alibaba_reasoning_options(toggle_entry)
+        self.assertEqual({"enableThinking": True, "thinkingBudget": 262144}, options)
+        self.assertEqual([], warnings)
+
+        budget_only = OPENCODE_SYNC_MODULE.CatalogEntry(
+            "alibaba/qwen-thinking",
+            {
+                "id": "qwen-thinking",
+                "providerID": "alibaba",
+                "reasoning_options": [{"type": "budget_tokens"}],
+            },
+        )
+        options, warnings = OPENCODE_SYNC_MODULE.alibaba_reasoning_options(budget_only)
+        self.assertEqual({"enableThinking": True}, options)
+        self.assertTrue(warnings, "a budget without a numeric max should warn")
+
+        no_options = OPENCODE_SYNC_MODULE.CatalogEntry(
+            "alibaba/plain", {"id": "plain", "providerID": "alibaba", "reasoning_options": []}
+        )
+        self.assertEqual(({}, []), OPENCODE_SYNC_MODULE.alibaba_reasoning_options(no_options))
+
+    def test_alibaba_provider_type_avoids_reasoning_effort_variants(self):
+        entry = OPENCODE_SYNC_MODULE.CatalogEntry(
+            "alibaba/qwen-max",
+            {
+                "id": "qwen-max",
+                "providerID": "alibaba",
+                "capabilities": {"reasoning": True},
+                "variants": {"high": {"reasoningEffort": "high"}},
+            },
+        )
+        for provider_type in ("bailian", "dashscope"):
+            variants, warnings = OPENCODE_SYNC_MODULE.convert_variants(entry, "translate", provider_type)
+            self.assertEqual({}, variants, provider_type)
+            self.assertTrue(warnings, provider_type)
+
+        variants, _ = OPENCODE_SYNC_MODULE.convert_variants(entry, "translate", "openai-compatible")
+        self.assertEqual({"high": {"reasoningEffort": "high"}}, variants)
+
+    def test_alibaba_provider_type_emits_thinking_options(self):
+        entry = OPENCODE_SYNC_MODULE.CatalogEntry(
+            "alibaba/qwen-max",
+            {
+                "id": "qwen-max",
+                "providerID": "alibaba",
+                "limit": {"context": 1000000, "output": 65536},
+                "reasoning_options": [{"type": "toggle"}],
+            },
+        )
+        match = {"status": "matched", "match_rule": "exact", "score": 100, "candidates": []}
+
+        results = OPENCODE_SYNC_MODULE.model_config_from_entry(
+            {"id": "qwen-max"},
+            entry,
+            match,
+            "translate",
+            "bailian",
+            contexts=(0,),
+        )
+        _, config, report = results[0]
+        self.assertEqual({"enableThinking": True}, config.get("options"))
+        self.assertIn("enableThinking", report["provider_options"])
+
+        other = OPENCODE_SYNC_MODULE.model_config_from_entry(
+            {"id": "qwen-max"},
+            entry,
+            match,
+            "translate",
+            "openai-compatible",
+            contexts=(0,),
+        )
+        self.assertNotIn("options", other[0][1], "non-Alibaba providers must not emit enableThinking")
+
     def test_report_summary_does_not_count_limited_version_as_model(self):
         args = Namespace(
             api_key_env="NEWAPI_API_KEY",
-            provider="newapi",
+            provider="MyProvider",
             variant_policy="none",
             context=(128000,),
         )

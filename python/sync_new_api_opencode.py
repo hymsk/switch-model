@@ -35,6 +35,13 @@ try:
 except NameError:
     EMBEDDED_OPENCODE_MODELS_GZIP = ""
 
+# build.sh injects the single source of truth from the VERSION file. The
+# fallback keeps direct source execution working without a build step.
+try:
+    GENERATOR_VERSION
+except NameError:
+    GENERATOR_VERSION = "unknown"
+
 EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
 MIN_COMPLETE_CATALOG_PROVIDERS = 10
 MIN_COMPLETE_CATALOG_ENTRIES = 100
@@ -107,7 +114,21 @@ def parse_contexts(value: str) -> Tuple[int, ...]:
     text = str(value).strip()
     if not text:
         raise argparse.ArgumentTypeError("must contain at least one context value")
-    return (parse_context_token(text),)
+    # Reject thousands separators such as 258,000. After comma became the shared
+    # value separator this input would otherwise silently parse as two windows.
+    if re.fullmatch(r"[0-9]{1,3}(,[0-9]{3})+[kK]?", text):
+        raise argparse.ArgumentTypeError(
+            "does not accept thousands separators; write 258000 instead of 258,000"
+        )
+    contexts: List[int] = []
+    for token in text.split(","):
+        token = token.strip()
+        if not token:
+            raise argparse.ArgumentTypeError("must not contain empty context values")
+        context = parse_context_token(token)
+        if context not in contexts:
+            contexts.append(context)
+    return tuple(contexts)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -157,7 +178,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         default="",
-        help="Output OpenCode provider ID; defaults to the source provider ID or newapi",
+        help="Output OpenCode provider ID; defaults to the source provider ID or MyProvider",
     )
     parser.add_argument(
         "--provider-name",
@@ -214,7 +235,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default="auto-group",
         help=(
             "Provider type determines npm package and reasoning format. "
-            "'bailian'/'dashscope' use @ai-sdk/alibaba with enableThinking instead of reasoningEffort. "
+            "'bailian'/'dashscope' use @ai-sdk/alibaba and emit enableThinking/thinkingBudget "
+            "provider options instead of reasoningEffort variants. "
             "'auto-group' automatically groups models by catalog providerID."
         ),
     )
@@ -235,9 +257,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--context",
         type=parse_contexts,
         default=(258000,),
-        metavar="TOKENS",
+        metavar="TOKENS[,TOKENS...]",
         help=(
-            "Generate a capped submode for the total context-window limit (examples: 258000, 258k, 258K). "
+            "Generate a capped submode for each total context-window limit "
+            "(examples: 258000, 258k, 258K, or 258000,128000). "
             "Use 0 to disable capped submodes (default: 258000)"
         ),
     )
@@ -338,11 +361,19 @@ def fetch_new_api_models(args: argparse.Namespace, models_url: str) -> List[Dict
     context = ssl._create_unverified_context() if args.insecure else None
     try:
         with urllib.request.urlopen(request, timeout=args.timeout, context=context) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            raw = response.read()
     except urllib.error.HTTPError as error:
         raise SyncError(f"Failed to fetch model list: HTTP {error.code} from {models_url}") from error
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise SyncError(f"Failed to fetch or parse model list from {models_url}: {error}") from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise SyncError(f"Failed to fetch model list from {models_url}: {error}") from error
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as error:
+        raise SyncError(
+            f"Model list response from {models_url} is not valid UTF-8: {error}"
+        ) from error
+    except json.JSONDecodeError as error:
+        raise SyncError(f"Failed to parse model list from {models_url}: {error}") from error
     return normalize_model_items(payload)
 
 
@@ -502,7 +533,12 @@ def load_opencode_models_catalog(path: Path) -> List[CatalogEntry]:
         raise SyncError(f"OpenCode models cache not found: {path}") from error
     except (OSError, json.JSONDecodeError) as error:
         raise SyncError(f"Failed to read OpenCode models cache {path}: {error}") from error
-    return catalog_entries_from_opencode_models(payload)
+    entries = catalog_entries_from_opencode_models(payload)
+    # A truncated or partial cache would silently degrade matching while still
+    # satisfying a "matched at least one model" check. Rejecting it here routes
+    # the caller into the existing embedded/runtime fallback chain.
+    validate_complete_catalog(entries, f"local OpenCode models cache {path}")
+    return entries
 
 
 def load_embedded_opencode_models_catalog() -> List[CatalogEntry]:
@@ -892,6 +928,48 @@ def find_nested_effort(value: Any) -> Optional[str]:
     return None
 
 
+ALIBABA_PROVIDER_TYPES = ("bailian", "dashscope")
+
+
+def alibaba_reasoning_options(entry: CatalogEntry) -> Tuple[Dict[str, Any], List[str]]:
+    """Translate Alibaba reasoning_options into @ai-sdk/alibaba provider options.
+
+    Alibaba models describe thinking as a toggle and/or a token budget rather
+    than as discrete effort levels, so `reasoningEffort` does not apply. The
+    @ai-sdk/alibaba provider accepts `enableThinking` (boolean) and
+    `thinkingBudget` (positive integer) instead.
+    """
+    options = entry.data.get("reasoning_options")
+    options = options if isinstance(options, list) else []
+    result: Dict[str, Any] = {}
+    warnings: List[str] = []
+    seen: Set[str] = set()
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        kind = option.get("type")
+        if kind in seen:
+            continue
+        if kind == "toggle":
+            seen.add(kind)
+            result["enableThinking"] = True
+        elif kind == "budget_tokens":
+            seen.add(kind)
+            budget = option.get("max")
+            if isinstance(budget, int) and budget > 0:
+                result["thinkingBudget"] = budget
+            else:
+                result["enableThinking"] = True
+                warnings.append(
+                    "Alibaba budget_tokens option has no numeric max; "
+                    "using enableThinking instead of thinkingBudget"
+                )
+    if result and not result.get("enableThinking") and "thinkingBudget" in result:
+        # A budget alone only takes effect together with thinking enabled.
+        result["enableThinking"] = True
+    return result, warnings
+
+
 def convert_variants(entry: CatalogEntry, policy: str, provider_type: str = "openai-compatible") -> Tuple[Dict[str, Any], List[str]]:
     if policy == "none":
         return {}, []
@@ -904,6 +982,13 @@ def convert_variants(entry: CatalogEntry, policy: str, provider_type: str = "ope
         if not isinstance(config, dict):
             continue
         direct = config.get("reasoningEffort")
+        if provider_type in ALIBABA_PROVIDER_TYPES:
+            # Alibaba uses enableThinking/thinkingBudget, not effort levels.
+            warnings.append(
+                f"variant {name} was skipped: @ai-sdk/alibaba does not accept reasoningEffort; "
+                "use enableThinking/thinkingBudget provider options"
+            )
+            continue
         if str(direct).lower() in EFFORT_LEVELS:
             result[name] = {"reasoningEffort": str(direct).lower()}
             continue
@@ -1138,10 +1223,16 @@ def model_config_from_entry(
     elif variants and match.get("effort_suffix"):
         warnings.append("effort-specific upstream model keeps base limits but does not expose nested variants")
     warnings.extend(variant_warnings)
+    if provider_type in ALIBABA_PROVIDER_TYPES:
+        alibaba_options, alibaba_warnings = alibaba_reasoning_options(entry)
+        if alibaba_options:
+            config["options"] = {**config.get("options", {}), **alibaba_options}
+        warnings.extend(alibaba_warnings)
     report.update({
         "limit": limit,
         "reasoning": config.get("reasoning"),
         "variants": sorted(config.get("variants", {})),
+        "provider_options": sorted(config.get("options", {})),
         "warnings": warnings,
     })
 
@@ -1303,13 +1394,13 @@ def build_provider_fragment(
         if not args.omit_api_key_option and api_key_ref is not None:
             provider_options["apiKey"] = api_key_ref
 
-        provider_name = args.provider_name or f"New API ({group_provider_id})"
+        provider_name = args.provider_name or f"MyProvider ({group_provider_id})"
         if len(groups) == 1:
-            provider_name = args.provider_name or "New API"
+            provider_name = args.provider_name or "MyProvider"
             provider_id = args.provider
         else:
-            # Use prefix like "newapi-alibaba", "newapi-deepseek"
-            base_name = args.provider if args.provider != "newapi" else "newapi"
+            # Use prefix like "MyProvider-alibaba", "MyProvider-deepseek"
+            base_name = args.provider if args.provider != "MyProvider" else "MyProvider"
             provider_id = f"{base_name}-{group_provider_id}"
 
         providers[provider_id] = {
@@ -1460,8 +1551,8 @@ def resolve_model_source(args: argparse.Namespace) -> Tuple[str, str, List[Dict[
         base_url = normalize_provider_base_url(args.base_url or source.base_url)
         return base_url, f"source-config:{source.path}", source.models
 
-    args.provider = args.provider or "newapi"
-    args.provider_name = args.provider_name or "New API"
+    args.provider = args.provider or "MyProvider"
+    args.provider_name = args.provider_name or "MyProvider"
     base_url = normalize_provider_base_url(args.base_url)
     models_url = resolve_models_url(args, base_url)
     return base_url, models_url, fetch_new_api_models(args, models_url)
@@ -1518,7 +1609,7 @@ def make_report(
             provider_groups[pid] = provider_groups.get(pid, 0) + 1
     return {
         "generator": "switch-model",
-        "generator_version": "0.1.0rc1",
+        "generator_version": GENERATOR_VERSION,
         "generated_at": utc_now(),
         "new_api": {"model_source": model_source, "model_count": model_count, "api_key_env": args.api_key_env},
         "catalog": {**catalog_meta, "entry_count": len(entries)},

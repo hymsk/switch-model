@@ -95,14 +95,14 @@ preview_codex_config() {
     echo ""
     echo -e "${YELLOW}配置文件:${NC} $CODEX_CONFIG"
     echo -e "${YELLOW}将要写入的内容:${NC}"
-    echo 'model_provider = "newapi"'
+    echo 'model_provider = "MyProvider"'
     echo "model = \"$model\""
     echo 'model_reasoning_effort = "high"'
     echo 'disable_response_storage = true'
     echo 'personality = "pragmatic"'
     echo ""
-    echo "[model_providers.newapi]"
-    echo 'name = "NewAPI"'
+    echo "[model_providers.MyProvider]"
+    echo 'name = "MyProvider"'
     echo "base_url = \"$url/v1\""
     echo 'wire_api = "responses"'
     echo 'requires_openai_auth = true'

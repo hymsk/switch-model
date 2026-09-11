@@ -187,6 +187,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default="all",
         help="Load all built-in providers or only currently visible providers",
     )
+    parser.add_argument(
+        "--no-catalog-refresh",
+        dest="catalog_refresh",
+        action="store_false",
+        help="Skip refreshing the local OpenCode model catalog before reading it",
+    )
+    parser.add_argument(
+        "--catalog-refresh-timeout",
+        type=float,
+        default=180.0,
+        help="Timeout in seconds for the OpenCode catalog refresh (default: 180)",
+    )
     parser.add_argument("--opencode-bin", default="opencode")
     parser.add_argument("--timeout", type=float, default=20.0, help="New API HTTP timeout in seconds")
     parser.add_argument("--command-timeout", type=float, default=180.0)
@@ -536,6 +548,32 @@ def get_opencode_version(args: argparse.Namespace) -> str:
         return "unknown"
 
 
+def refresh_opencode_catalog(args: argparse.Namespace) -> Optional[str]:
+    """Refresh the local OpenCode catalog cache before it is read.
+
+    A stale cache silently degrades matching: newly published models resolve to
+    ``unmatched`` and ambiguous families stay unresolved. Refreshing first keeps
+    matching aligned with the currently published catalog. Failure is reported as
+    a warning so an offline run can still fall back to the existing cache.
+    """
+    if not getattr(args, "catalog_refresh", True):
+        return None
+    env = os.environ.copy()
+    env.pop(args.api_key_env, None)
+    env.update({"NO_COLOR": "1", "TERM": "dumb"})
+    timeout = getattr(args, "catalog_refresh_timeout", 180.0)
+    try:
+        run_command(
+            [args.opencode_bin, "models", "--refresh", "--pure"],
+            timeout,
+            env=env,
+        )
+    except SyncError as error:
+        eprint(f"Warning: OpenCode catalog refresh failed; using the existing cache: {error}")
+        return None
+    return "opencode-models-refresh"
+
+
 def write_json(path: Path, payload: Any) -> None:
     path = path.expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -596,6 +634,13 @@ def acquire_catalog(
     version = get_opencode_version(args)
     prefix_fallback = getattr(args, "prefix_fallback", True)
 
+    refresh_marker = refresh_opencode_catalog(args)
+
+    def with_refresh(meta: Dict[str, Any]) -> Dict[str, Any]:
+        if refresh_marker:
+            meta["catalog_refresh"] = refresh_marker
+        return meta
+
     def load_current() -> Tuple[List[CatalogEntry], Dict[str, Any]]:
         env = os.environ.copy()
         env.pop(args.api_key_env, None)
@@ -609,7 +654,8 @@ def acquire_catalog(
         return entries, {"source": "opencode-current", "opencode_version": version}
 
     if args.catalog_mode == "current":
-        return load_current()
+        current_entries, current_meta = load_current()
+        return current_entries, with_refresh(current_meta)
 
     try:
         entries = load_opencode_models_catalog(args.opencode_models_file)
@@ -632,7 +678,7 @@ def acquire_catalog(
                     "or provide --catalog-file."
                 ) from current_error
             eprint("Warning: OpenCode catalog cache and embedded snapshot are unavailable; using current runtime catalog.")
-            return current_entries, {**current_meta, "local_cache_error": str(local_error), "embedded_error": str(embedded_error)}
+            return current_entries, with_refresh({**current_meta, "local_cache_error": str(local_error), "embedded_error": str(embedded_error)})
         else:
             expected_ids = list(expected_model_ids or [])
             if expected_ids and catalog_match_count(expected_ids, entries, mappings, prefix_fallback) == 0:
@@ -643,33 +689,33 @@ def acquire_catalog(
                         "Warning: embedded catalog matched none of the requested models and runtime catalog was unavailable; "
                         "continuing with the complete embedded snapshot."
                     )
-                    return entries, {
+                    return entries, with_refresh({
                         "source": "embedded-opencode-models",
                         "opencode_version": version,
                         "providers": len({entry.provider_id for entry in entries}),
                         "local_cache_error": str(local_error),
                         "runtime_error": str(current_error),
                         "requested_model_matches": 0,
-                    }
+                    })
                 current_matches = catalog_match_count(expected_ids, current_entries, mappings, prefix_fallback)
                 if current_matches > 0:
                     eprint(
                         "Warning: embedded catalog matched none of the requested models; using the current runtime catalog instead."
                     )
-                    return current_entries, {
+                    return current_entries, with_refresh({
                         **current_meta,
                         "local_cache_error": str(local_error),
                         "embedded_model_matches": 0,
                         "requested_model_matches": current_matches,
-                    }
+                    })
             eprint("Warning: OpenCode catalog cache unavailable; using embedded complete snapshot.")
-            return entries, {
+            return entries, with_refresh({
                 "source": "embedded-opencode-models",
                 "opencode_version": version,
                 "providers": len({entry.provider_id for entry in entries}),
                 "local_cache_error": str(local_error),
                 "requested_model_matches": catalog_match_count(expected_ids, entries, mappings, prefix_fallback) if expected_ids else None,
-            }
+            })
     else:
         expected_ids = list(expected_model_ids or [])
         cache_matches = catalog_match_count(expected_ids, entries, mappings, prefix_fallback) if expected_ids else None
@@ -686,18 +732,18 @@ def acquire_catalog(
                     eprint(
                         "Warning: local OpenCode catalog matched none of the requested models; using the embedded complete snapshot instead."
                     )
-                    return embedded_entries, {
+                    return embedded_entries, with_refresh({
                         "source": "embedded-opencode-models",
                         "opencode_version": version,
                         "cache": str(args.opencode_models_file.expanduser()),
                         "cache_model_matches": 0,
                         "requested_model_matches": embedded_matches,
                         "providers": len({entry.provider_id for entry in embedded_entries}),
-                    }
+                    })
             try:
                 current_entries, current_meta = load_current()
             except SyncError as current_error:
-                return entries, {
+                return entries, with_refresh({
                     "source": "opencode-models-cache",
                     "opencode_version": version,
                     "cache": str(args.opencode_models_file.expanduser()),
@@ -705,25 +751,25 @@ def acquire_catalog(
                     "requested_model_matches": 0,
                     "embedded_error": str(embedded_error) if embedded_error else None,
                     "runtime_error": str(current_error),
-                }
+                })
             current_matches = catalog_match_count(expected_ids, current_entries, mappings, prefix_fallback)
             if current_matches > 0:
                 eprint(
                     "Warning: local OpenCode catalog matched none of the requested models; using the current runtime catalog instead."
                 )
-                return current_entries, {
+                return current_entries, with_refresh({
                     **current_meta,
                     "cache": str(args.opencode_models_file.expanduser()),
                     "cache_model_matches": 0,
                     "requested_model_matches": current_matches,
-                }
-        return entries, {
+                })
+        return entries, with_refresh({
             "source": "opencode-models-cache",
             "opencode_version": version,
             "cache": str(args.opencode_models_file.expanduser()),
             "providers": len({entry.provider_id for entry in entries}),
             "requested_model_matches": cache_matches,
-        }
+        })
 
 
 def normalized_id(value: str) -> str:

@@ -20,6 +20,7 @@ update_opencode_config() {
     local mapping_file="${OPENCODE_MAPPING_FILE:-$DEFAULT_OPENCODE_MAPPING_FILE}"
     local mapping_file_explicit="${OPENCODE_MAPPING_FILE_EXPLICIT:-false}"
     local prefix_fallback="${OPENCODE_PREFIX_FALLBACK:-true}"
+    local catalog_refresh="${OPENCODE_CATALOG_REFRESH:-true}"
     local report_file="${OPENCODE_REPORT_FILE:-$DEFAULT_OPENCODE_REPORT_FILE}"
     local -a sync_args=()
 
@@ -31,6 +32,9 @@ update_opencode_config() {
     fi
     if [ "$prefix_fallback" = false ]; then
         sync_args+=(--no-prefix-fallback)
+    fi
+    if [ "$catalog_refresh" = false ]; then
+        sync_args+=(--no-catalog-refresh)
     fi
 
     mkdir -p "$(dirname "$report_file")"
@@ -76,6 +80,7 @@ preview_opencode_config() {
     local mapping_file="${OPENCODE_MAPPING_FILE:-$DEFAULT_OPENCODE_MAPPING_FILE}"
     local mapping_file_explicit="${OPENCODE_MAPPING_FILE_EXPLICIT:-false}"
     local prefix_fallback="${OPENCODE_PREFIX_FALLBACK:-true}"
+    local catalog_refresh="${OPENCODE_CATALOG_REFRESH:-true}"
     local report_file
     local -a sync_args=()
 
@@ -87,6 +92,9 @@ preview_opencode_config() {
     fi
     if [ "$prefix_fallback" = false ]; then
         sync_args+=(--no-prefix-fallback)
+    fi
+    if [ "$catalog_refresh" = false ]; then
+        sync_args+=(--no-catalog-refresh)
     fi
 
     echo -e "${BLUE}=== OpenCode 配置预览 ===${NC}"

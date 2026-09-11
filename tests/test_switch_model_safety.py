@@ -444,6 +444,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             api_key_env="NEWAPI_API_KEY",
             opencode_bin="opencode",
             command_timeout=20,
+            catalog_refresh=False,
         )
         embedded_entries = [
             OPENCODE_SYNC_MODULE.CatalogEntry(
@@ -477,6 +478,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             api_key_env="NEWAPI_API_KEY",
             opencode_bin="opencode",
             command_timeout=20,
+            catalog_refresh=False,
         )
         embedded_entries = [
             OPENCODE_SYNC_MODULE.CatalogEntry(
@@ -509,6 +511,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             opencode_bin="opencode",
             command_timeout=20,
             prefix_fallback=True,
+            catalog_refresh=False,
         )
         embedded_entries = [
             OPENCODE_SYNC_MODULE.CatalogEntry(
@@ -543,6 +546,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             opencode_bin="opencode",
             command_timeout=20,
             prefix_fallback=True,
+            catalog_refresh=False,
         )
         cache_entries = [
             OPENCODE_SYNC_MODULE.CatalogEntry(
@@ -572,6 +576,7 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
             opencode_bin="opencode",
             command_timeout=20,
             prefix_fallback=True,
+            catalog_refresh=False,
         )
         cache_entries = [
             OPENCODE_SYNC_MODULE.CatalogEntry(
@@ -596,6 +601,86 @@ preview_opencode_config "https://api.example.com" "newapi" "NewAPI" "0"
         self.assertEqual("embedded-opencode-models", metadata["source"])
         self.assertEqual(1, metadata["requested_model_matches"])
         run_command.assert_not_called()
+
+    def test_catalog_refresh_is_enabled_by_default_and_records_metadata(self):
+        args = OPENCODE_SYNC_MODULE.parse_args([])
+        self.assertTrue(args.catalog_refresh)
+
+        cache_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                "openai/requested-model",
+                {"id": "requested-model", "providerID": "openai", "limit": {"context": 400000}},
+            )
+        ]
+
+        with patch.object(OPENCODE_SYNC_MODULE, "get_opencode_version", return_value="test"), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_opencode_models_catalog", return_value=cache_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "run_command", return_value="") as run_command:
+            entries, metadata = OPENCODE_SYNC_MODULE.acquire_catalog(args, ["requested-model"])
+
+        self.assertEqual("opencode-models-cache", metadata["source"])
+        self.assertEqual("opencode-models-refresh", metadata["catalog_refresh"])
+        run_command.assert_called_once()
+        self.assertEqual(
+            ["opencode", "models", "--refresh", "--pure"],
+            run_command.call_args[0][0],
+        )
+
+    def test_no_catalog_refresh_skips_the_refresh_call(self):
+        args = OPENCODE_SYNC_MODULE.parse_args(["--no-catalog-refresh"])
+        self.assertFalse(args.catalog_refresh)
+
+        cache_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                "openai/requested-model",
+                {"id": "requested-model", "providerID": "openai", "limit": {"context": 400000}},
+            )
+        ]
+
+        with patch.object(OPENCODE_SYNC_MODULE, "get_opencode_version", return_value="test"), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_opencode_models_catalog", return_value=cache_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "run_command", return_value="") as run_command:
+            entries, metadata = OPENCODE_SYNC_MODULE.acquire_catalog(args, ["requested-model"])
+
+        run_command.assert_not_called()
+        self.assertNotIn("catalog_refresh", metadata)
+
+    def test_catalog_refresh_failure_falls_back_to_existing_cache(self):
+        args = OPENCODE_SYNC_MODULE.parse_args([])
+        cache_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                "openai/requested-model",
+                {"id": "requested-model", "providerID": "openai", "limit": {"context": 400000}},
+            )
+        ]
+
+        with patch.object(OPENCODE_SYNC_MODULE, "get_opencode_version", return_value="test"), \
+             patch.object(OPENCODE_SYNC_MODULE, "load_opencode_models_catalog", return_value=cache_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "run_command", side_effect=OPENCODE_SYNC_MODULE.SyncError("offline")):
+            with redirect_stderr(StringIO()) as stderr:
+                entries, metadata = OPENCODE_SYNC_MODULE.acquire_catalog(args, ["requested-model"])
+
+        self.assertEqual(["openai/requested-model"], [entry.full_id for entry in entries])
+        self.assertEqual("opencode-models-cache", metadata["source"])
+        self.assertNotIn("catalog_refresh", metadata)
+        self.assertIn("refresh failed", stderr.getvalue())
+
+    def test_catalog_refresh_is_skipped_for_fixture_catalogs(self):
+        args = OPENCODE_SYNC_MODULE.parse_args(["--catalog-file", "tests/fixtures/fixture.json"])
+
+        fixture_entries = [
+            OPENCODE_SYNC_MODULE.CatalogEntry(
+                "openai/requested-model",
+                {"id": "requested-model", "providerID": "openai", "limit": {"context": 400000}},
+            )
+        ]
+
+        with patch.object(OPENCODE_SYNC_MODULE, "load_catalog_file", return_value=fixture_entries), \
+             patch.object(OPENCODE_SYNC_MODULE, "run_command") as run_command:
+            entries, metadata = OPENCODE_SYNC_MODULE.acquire_catalog(args, ["requested-model"])
+
+        run_command.assert_not_called()
+        self.assertEqual("fixture", metadata["opencode_version"])
 
     def test_context_argument_accepts_plain_and_k_formats(self):
         for value in ("258000", "258k", "258K"):

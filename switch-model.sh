@@ -1264,12 +1264,22 @@ def select_entry(
                 "candidates": [item[3].full_id for item in tied[1:4]],
                 "warnings": ["equivalent metadata was available from multiple catalog providers; selected deterministically"],
             }
-        return None, {
+        # Ties carry genuinely different metadata. Limits differ across resellers,
+        # so no candidate is authoritative; inherit the stable first candidate
+        # instead of dropping limits entirely. The report keeps the competing
+        # candidates and an ambiguity warning so `--strict` and manual review can
+        # still spot the fallback.
+        return top[3], {
             "status": "ambiguous",
-            "match_rule": top[1],
+            "match_rule": f"{top[1]}-first-candidate",
             "score": top[0],
+            "effort_suffix": top[2],
             "candidates": [item[3].full_id for item in tied[:10]],
-            "warnings": ["multiple catalog models have the same best score; use --mapping-file"],
+            "selected": top[3].full_id,
+            "warnings": [
+                "multiple catalog models have the same best score; "
+                f"selected the first candidate {top[3].full_id}; use --mapping-file to pin a specific source"
+            ],
         }
     return top[3], {
         "status": "matched",

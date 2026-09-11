@@ -154,6 +154,59 @@ class PrefixFallbackTest(unittest.TestCase):
         self.assertEqual("provider-prefix-stripped-equivalent-metadata", match["match_rule"])
         self.assertEqual("xiaomi-token-plan-ams/mimo-v2.5", entry.full_id)
 
+    def test_differing_tie_metadata_inherits_the_first_candidate(self):
+        entries = [
+            MODULE.CatalogEntry(
+                f"{provider}/deepseek-v4.1-flash",
+                {
+                    "id": "deepseek-v4.1-flash",
+                    "providerID": provider,
+                    "limit": {"context": context, "output": output},
+                },
+            )
+            for provider, context, output in (
+                ("hyper", 1048576, 26214),
+                ("llmgateway", 1050000, 384000),
+                ("opencode-go", 1000000, 384000),
+                ("requesty", 1048576, 393216),
+            )
+        ]
+
+        entry, match = MODULE.select_entry("workbuddy/deepseek-v4.1-flash", entries, None)
+
+        self.assertIsNotNone(entry)
+        self.assertEqual("hyper/deepseek-v4.1-flash", entry.full_id)
+        self.assertEqual("ambiguous", match["status"])
+        self.assertEqual("provider-prefix-stripped-first-candidate", match["match_rule"])
+        self.assertEqual("hyper/deepseek-v4.1-flash", match["selected"])
+        self.assertIn("use --mapping-file", " ".join(match["warnings"]))
+
+    def test_differing_tie_still_reports_a_usable_limit(self):
+        entries = [
+            MODULE.CatalogEntry(
+                f"{provider}/deepseek-v4.1-flash",
+                {
+                    "id": "deepseek-v4.1-flash",
+                    "providerID": provider,
+                    "limit": {"context": context, "output": output},
+                },
+            )
+            for provider, context, output in (
+                ("hyper", 1048576, 26214),
+                ("requesty", 1048576, 393216),
+            )
+        ]
+
+        entry, match = MODULE.select_entry("workbuddy/deepseek-v4.1-flash", entries, None)
+        results = MODULE.model_config_from_entry(
+            {"id": "workbuddy/deepseek-v4.1-flash"}, entry, match, "translate", contexts=(0,)
+        )
+
+        self.assertEqual(1, len(results))
+        _, config, report = results[0]
+        self.assertEqual({"context": 1048576, "output": 26214}, config["limit"])
+        self.assertEqual("ambiguous", report["status"])
+
     def test_fallback_does_not_cross_major_version(self):
         entry, match = MODULE.select_entry("glm-4.9-flash-local", self.entries, None)
 

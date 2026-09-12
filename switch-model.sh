@@ -308,14 +308,10 @@ PROVIDER_TYPE_NPM = {
 }
 
 # Catalog providerID -> npm package mapping
+# Only entries that differ from the fallback default belong here.
 CATALOG_PROVIDER_NPM = {
     "alibaba": "@ai-sdk/alibaba",
     "alibaba-cn": "@ai-sdk/alibaba",
-    "zhipuai": "@ai-sdk/openai-compatible",
-    "zai": "@ai-sdk/openai-compatible",
-    "deepseek": "@ai-sdk/deepseek",
-    "moonshotai": "@ai-sdk/openai-compatible",
-    "moonshotai-cn": "@ai-sdk/openai-compatible",
 }
 
 
@@ -1476,6 +1472,14 @@ def model_config_from_entry(
     elif variants and match.get("effort_suffix"):
         warnings.append("effort-specific upstream model keeps base limits but does not expose nested variants")
     warnings.extend(variant_warnings)
+    if provider_type == "openai-compatible" and entry.provider_id == "deepseek":
+        reasoning_options = entry.data.get("reasoning_options", [])
+        if config.get("reasoning") is True and isinstance(reasoning_options, list) and any(
+            isinstance(option, dict) and option.get("type") == "toggle"
+            for option in reasoning_options
+        ):
+            # Capability metadata and effort tiers do not enable thinking.
+            config["options"] = {**config.get("options", {}), "thinking": {"type": "enabled"}}
     if provider_type in ALIBABA_PROVIDER_TYPES:
         alibaba_options, alibaba_warnings = alibaba_reasoning_options(entry)
         if alibaba_options:

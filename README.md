@@ -142,6 +142,8 @@ opencode models --refresh --pure
 | `bailian` / `dashscope` | `@ai-sdk/alibaba` | provider 级 `enableThinking` / `thinkingBudget` |
 | `auto-group` | 按 catalog providerID 决定 | 每个分组使用 `openai-compatible` 语义 |
 
+DeepSeek 分组使用 `@ai-sdk/openai-compatible`，保留自定义渠道 ID，避免宿主未映射原生 DeepSeek SDK 参数命名空间而丢失选项。匹配到 DeepSeek 官方目录且 `reasoning: true`、`reasoning_options` 含 `toggle` 时，生成模型级 `options.thinking: {"type": "enabled"}`；`reasoningEffort` 档位只控制强度，不代替开关。原始模型及 context 子模式均继承开关，`--variant-policy none` 仅关闭档位生成。更新脚本后需重新运行原切换命令并重新加载 OpenCode，已有配置不会自动迁移。
+
 阿里云系模型（`alibaba`、`alibaba-cn`）用「开关」和「token 预算」描述思考能力，没有 `low`/`medium`/`high` 档位，因此 `bailian`/`dashscope` 模式不输出 `reasoningEffort` variants，而是生成：
 
 - `reasoning_options` 含 `toggle` → `enableThinking: true`

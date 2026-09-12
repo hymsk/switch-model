@@ -14,6 +14,7 @@
 - `--context` 支持逗号分隔的多个值，并为每个小于原生窗口的值生成一个 capped 子模式；重复值合并。
 - 本地 OpenCode cache 与内嵌 snapshot 使用同一套完整性校验；截断或残缺的 cache 会回退到下一个 catalog 来源，不再被静默接受。
 - `bailian` / `dashscope` provider 类型实现 `enableThinking` / `thinkingBudget` provider 选项，不再输出 `reasoningEffort` variants，行为与帮助文本一致。
+- DeepSeek 分组改用 `@ai-sdk/openai-compatible` 传输，并在官方目录条目声明 `reasoning` 且 `reasoning_options` 含 `toggle` 时生成模型级 `options.thinking`。此前原生 DeepSeek SDK 按固定命名空间读取选项，而生成的 provider ID 带前缀，`thinking` 与 `reasoningEffort` 会被静默丢弃。重新执行原切换命令才会更新已有配置。
 - 报告中的 `generator_version` 改为由 `VERSION` 文件在构建时注入，移除硬编码。
 - 模型列表响应的非 UTF-8 解码和读取异常统一转换为受控错误，不再输出裸 traceback。
 - 拒绝将测试 fixture 或不完整模型目录作为正式内嵌 catalog。

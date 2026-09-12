@@ -116,6 +116,54 @@ class ProviderPreferenceTest(unittest.TestCase):
         self.assertEqual("unmatched", match["status"])
 
 
+class DeepSeekThinkingTest(unittest.TestCase):
+    def entries(self, reasoning=True, toggle=True, provider="deepseek"):
+        return MODULE.catalog_entries_from_opencode_models({provider: {"models": {
+            "deepseek-flash": {
+                "reasoning": reasoning,
+                "reasoning_options": ([{"type": "toggle"}] if toggle else []) + [
+                    {"type": "effort", "values": ["low", "high", "max"]}],
+                "interleaved": {"field": "reasoning_content"},
+                "limit": {"context": 1000000, "output": 384000},
+            }
+        }}})
+
+    def test_alias_enables_thinking_with_stable_ids_and_compatible_transport(self):
+        for mode in ("auto-group", "openai-compatible"):
+            for policy in ("translate", "compatible", "none"):
+                with self.subTest(mode=mode, policy=policy):
+                    args = MODULE.parse_args(["--provider", "custom.channel", "--provider-type", mode,
+                                              "--variant-policy", policy])
+                    mid = "gateway/deepseek-v4.1-flash"
+                    fragment, reports = MODULE.build_provider_fragment(
+                        args, "https://example.invalid/v1", [{"id": mid}], self.entries(), {})
+                    provider = fragment["provider"]["custom.channel"]
+                    self.assertEqual("@ai-sdk/openai-compatible", provider["npm"])
+                    self.assertEqual(2, len(provider["models"]))
+                    for key, config in provider["models"].items():
+                        self.assertEqual(mid, config.get("id", key))
+                        self.assertTrue(config["reasoning"])
+                        self.assertEqual({"thinking": {"type": "enabled"}}, config["options"])
+                        self.assertEqual({"field": "reasoning_content"}, config["interleaved"])
+                        self.assertEqual([] if policy == "none" else ["high", "low", "max"],
+                                         sorted(config.get("variants", {})))
+                    self.assertEqual(["thinking"], reports[0]["provider_options"])
+
+    def test_only_explicit_deepseek_toggle_is_enabled(self):
+        for reasoning, toggle, provider_type, provider in (
+            (False, True, "openai-compatible", "deepseek"),
+            (True, False, "openai-compatible", "deepseek"),
+            (True, True, "bailian", "deepseek"),
+            (True, True, "openai-compatible", "openai"),
+        ):
+            with self.subTest(reasoning=reasoning, toggle=toggle,
+                              provider_type=provider_type, provider=provider):
+                entry = self.entries(reasoning, toggle, provider)[0]
+                config = MODULE.model_config_from_entry(
+                    {"id": "deepseek-flash"}, entry, {}, "translate", provider_type, (0,))[0][1]
+                self.assertNotIn("thinking", config.get("options", {}))
+
+
 class PrefixFallbackTest(unittest.TestCase):
     def setUp(self):
         self.glm52 = MODULE.CatalogEntry(

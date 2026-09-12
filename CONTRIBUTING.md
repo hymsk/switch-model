@@ -18,6 +18,12 @@
    ```
 
 4. 测试必须使用 fixture、临时 `HOME` 和本地 mock server，不得调用真实模型服务或读取开发者配置。
+   可选真实宿主 thinking 请求验证（隔离 HOME，仅连接 loopback mock）：
+
+   ```bash
+   SWITCH_MODEL_OPENCODE_BIN="$(command -v opencode)" python3 -m unittest discover -s tests -p 'test_opencode_thinking.py' -v
+   ```
+
 5. 提交前审阅完整 diff，排除生成缓存、凭据、用户配置、本机绝对路径和调试残留。
 
 ## 提交消息

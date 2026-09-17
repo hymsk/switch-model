@@ -88,6 +88,47 @@ class ProviderPreferenceTest(unittest.TestCase):
             selected, _ = MODULE.select_entry(model, [official], None)
             self.assertIsNone(selected)
 
+    def test_v41_flash_alias_applies_to_gateway_suffixed_ids(self):
+        official = self.entry("deepseek", "deepseek-flash", limit={"context": 1000000, "output": 384000})
+        # A reseller that also publishes the literal V4.1 Flash ID must not win
+        # merely because the gateway appended a suffix to the official alias.
+        reseller = self.entry("nano-gpt", "deepseek-v4.1-flash", limit={"context": 1048576, "output": 384000})
+        for model in (
+            "deepseek-v4.1-flash-local",
+            "workbuddy/deepseek-v4.1-flash-local",
+            "WorkBuddy/DeepSeek-V4.1-Flash-local",
+        ):
+            with self.subTest(model=model):
+                selected, match = MODULE.select_entry(model, [reseller, official], None)
+                self.assertEqual(official, selected)
+                self.assertEqual("mapped", match["status"])
+                self.assertEqual("official-flash-alias", match["match_rule"])
+
+    def test_v41_flash_alias_keeps_effort_suffix_orthogonal(self):
+        official = self.entry("deepseek", "deepseek-flash", limit={"context": 1000000, "output": 384000})
+        for model, effort in (
+            ("deepseek-v4.1-flash-high", "high"),
+            ("workbuddy/deepseek-v4.1-flash-max", "max"),
+        ):
+            with self.subTest(model=model):
+                selected, match = MODULE.select_entry(model, [official], None)
+                self.assertEqual(official, selected)
+                self.assertEqual("official-flash-alias", match["match_rule"])
+                # The effort level must stay visible; an effort-specific upstream
+                # model keeps base limits without nested variants.
+                self.assertEqual(effort, match["effort_suffix"])
+                _, config, _ = MODULE.model_config_from_entry(
+                    {"id": model}, selected, match, "translate", contexts=(0,)
+                )[0]
+                self.assertNotIn("variants", config)
+
+    def test_v41_flash_alias_does_not_cross_version_or_model(self):
+        official = self.entry("deepseek", "deepseek-flash")
+        for model in ("deepseek-v4.1-pro", "deepseek-v4.2-flash", "deepseek-v4.1", "deepseek-flash"):
+            with self.subTest(model=model):
+                selected, match = MODULE.select_entry(model, [official], None)
+                self.assertNotEqual("official-flash-alias", match.get("match_rule"))
+
     def test_api_id_can_select_official(self):
         official = self.entry("deepseek", "deepseek-chat", api={"id": "deepseek-v4"})
         selected, _ = MODULE.select_entry("hyper/deepseek-v4",

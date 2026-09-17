@@ -296,6 +296,12 @@ except NameError:
     GENERATOR_VERSION = "unknown"
 
 EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
+# The official V4.1 Flash entry is published as `deepseek/deepseek-flash`, so the
+# remote ID cannot be matched by string similarity. Gateways additionally append
+# a suffix such as `deepseek-v4.1-flash-local`, which arrives as a new `-`
+# segment after the alias.
+OFFICIAL_FLASH_ALIAS = "deepseek-v4.1-flash"
+OFFICIAL_FLASH_CATALOG_ID = "deepseek/deepseek-flash"
 MIN_COMPLETE_CATALOG_PROVIDERS = 10
 MIN_COMPLETE_CATALOG_ENTRIES = 100
 MIN_COMPLETE_CATALOG_LIMIT_RATIO = 0.5
@@ -1269,6 +1275,23 @@ def model_id_segments(value: str) -> List[str]:
     return [segment for segment in strip_provider_prefix(value).lower().split("-") if segment]
 
 
+def matches_official_flash_alias(model_id: str) -> bool:
+    """Accept the V4.1 Flash alias, including a gateway-appended suffix.
+
+    Gateways expose the same upstream model under IDs such as
+    `deepseek-v4.1-flash-local`. The alias must still apply so the official
+    metadata wins instead of an arbitrary reseller. Matching requires whole
+    `-` segments: `deepseek-v4.1-flash` and `deepseek-v4.1-flash-local` match,
+    while `deepseek-v4.1-pro` and `deepseek-v4.2-flash` do not. An effort level
+    is orthogonal, so it is stripped before matching and reported separately by
+    the caller.
+    """
+    base_id, _ = split_effort_suffix(strip_provider_prefix(model_id))
+    alias_segments = OFFICIAL_FLASH_ALIAS.split("-")
+    segments = [segment for segment in base_id.lower().split("-") if segment]
+    return segments[: len(alias_segments)] == alias_segments
+
+
 def prefix_fallback_entries(model_id: str, entries: List[CatalogEntry]) -> List[Tuple[int, int, int, CatalogEntry]]:
     """Find catalog IDs that safely preserve a custom model's family and version prefix."""
     target_segments = model_id_segments(model_id)
@@ -1309,17 +1332,21 @@ def select_entry(
         }
 
     # The official V4.1 Flash catalog ID omits the version; user mappings win.
-    if strip_provider_prefix(model_id).lower() == "deepseek-v4.1-flash":
+    # A gateway suffix such as `-local` keeps the same upstream model, so the
+    # alias is matched on whole segments rather than an exact ID comparison.
+    if matches_official_flash_alias(model_id):
         official = next(
-            (entry for entry in entries if entry.full_id.lower() == "deepseek/deepseek-flash"),
+            (entry for entry in entries if entry.full_id.lower() == OFFICIAL_FLASH_CATALOG_ID),
             None,
         )
         if official is not None:
+            _, effort = split_effort_suffix(strip_provider_prefix(model_id))
             return official, {
                 "status": "mapped",
                 "match_rule": "official-flash-alias",
                 "score": 1000,
                 "selected": official.full_id,
+                "effort_suffix": effort,
                 "candidates": [],
                 "warnings": ["deepseek-v4.1-flash inherits official deepseek-flash metadata; upstream model ID is unchanged"],
             }

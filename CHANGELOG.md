@@ -10,6 +10,7 @@
 ### Other changes
 
 - 默认构建改为每次先刷新 OpenCode catalog 再嵌入，不再复用 Git `HEAD` 中的旧快照。刷新在隔离的临时 `XDG_CACHE_HOME` 中执行，不读取也不改写开发机 cache；刷新失败会让构建直接失败。新增 `OPENCODE_BIN` 与 `OPENCODE_CATALOG_REFRESH_TIMEOUT`。
+- `deepseek-v4.1-flash` 内置别名改为按完整 `-` 分段前缀匹配：网关追加后缀的 ID（如 `deepseek-v4.1-flash-local`）现在命中 `deepseek/deepseek-flash` 原厂元数据，不再回退到转售商；effort 档位与别名正交，命中后仍保留档位语义。
 - 新增 `--insecure` 与 `SWITCH_MODEL_INSECURE=true`，对三种模式统一跳过模型列表请求的 TLS 证书校验；OpenCode 同步器同样收到该选项。默认保持校验，开启时输出警告。
 - 新增 `~/.config/api-keys/default.provider`，文件内容作为 OpenCode provider 名称；命令行位置参数优先。
 - 请求模型列表时通过 `curl --config -` 从 stdin 传递认证头，不再写入临时文件，API Key 不出现在磁盘或进程参数中。

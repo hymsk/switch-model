@@ -145,6 +145,8 @@ opencode models --refresh --pure
 
 内置别名：`deepseek-v4.1-flash`（含渠道前缀、忽略大小写）优先映射到 `deepseek/deepseek-flash`（原厂显示名称为 DeepSeek V4.1 Flash），高于普通评分，报告规则为 `official-flash-alias`。这是同一模型的 ID 别名，不是回退到旧版 `deepseek-v4-flash`。仅继承元数据，不修改远端模型 ID；显式 `--mapping-file` 仍优先。原厂条目不存在时恢复普通匹配，不扩展到其他版本或 Pro 模型。
 
+别名按完整 `-` 分段前缀匹配，因此网关追加后缀的 ID（如 `deepseek-v4.1-flash-local`）同样命中原厂元数据，而不会被字典序靠前的转售商抢先。`deepseek-v4.1-pro`、`deepseek-v4.2-flash` 等不同版本或型号不会命中。effort 档位（`-high`、`-max` 等）与别名正交：先剥离档位再做别名判断，命中后仍按 effort 语义处理（保留档位、不输出嵌套 variants）。
+
 ### Provider 类型与推理配置
 
 `--provider-type` 决定 npm 包和推理参数的表达方式：

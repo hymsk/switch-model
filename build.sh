@@ -9,12 +9,14 @@ SHELL_DIR="$SCRIPT_DIR/shell"
 PYTHON_DIR="$SCRIPT_DIR/python"
 VERSION_FILE="$SCRIPT_DIR/VERSION"
 OPENCODE_MODELS_FILE="${OPENCODE_MODELS_FILE:-}"
-CATALOG_TEMP=""
+OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
+OPENCODE_CATALOG_REFRESH_TIMEOUT="${OPENCODE_CATALOG_REFRESH_TIMEOUT:-180}"
+CATALOG_REFRESH_DIR=""
 
 cleanup_build_output() {
     rm -f "$BUILD_OUTPUT"
-    if [ -n "$CATALOG_TEMP" ]; then
-        rm -f "$CATALOG_TEMP"
+    if [ -n "$CATALOG_REFRESH_DIR" ]; then
+        rm -rf "$CATALOG_REFRESH_DIR"
     fi
 }
 
@@ -92,52 +94,52 @@ ensure_opencode_models_file() {
         return 1
     fi
 
-    CATALOG_TEMP="$(mktemp "$SCRIPT_DIR/.opencode-models.XXXXXX.json")"
-    # Default builds are anchored to Git HEAD. A dirty or locally generated
-    # bundle is never accepted as an implicit catalog source.
-    local catalog_source
-    local catalog_source_label="Git HEAD:switch-model.sh"
-    if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-        && git -C "$SCRIPT_DIR" cat-file -e HEAD:switch-model.sh >/dev/null 2>&1; then
-        catalog_source="$(mktemp "$SCRIPT_DIR/.switch-model-reviewed.XXXXXX.sh")"
-        git -C "$SCRIPT_DIR" show HEAD:switch-model.sh > "$catalog_source"
-    else
-        echo "Error: no reviewed Git HEAD catalog is available for default reuse." >&2
+    # Default builds always refresh the catalog first so the embedded snapshot
+    # tracks the currently published model list instead of a previously
+    # committed one. The refresh runs in an isolated XDG_CACHE_HOME so it never
+    # reads or rewrites the developer's own OpenCode cache.
+    if ! command -v "$OPENCODE_BIN" >/dev/null 2>&1; then
+        echo "Error: '$OPENCODE_BIN' was not found, so the OpenCode catalog cannot be refreshed." >&2
+        echo "Install the OpenCode CLI, or set OPENCODE_MODELS_FILE to a reviewed complete catalog snapshot." >&2
+        return 1
+    fi
+
+    CATALOG_REFRESH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/switch-model-catalog.XXXXXX")"
+    local refresh_cache_dir="$CATALOG_REFRESH_DIR/cache"
+    mkdir -p "$refresh_cache_dir"
+
+    echo "Refreshing OpenCode catalog with: $OPENCODE_BIN models --refresh --pure"
+    # `timeout` is not available on every supported platform; fall back to an
+    # unbounded refresh there rather than failing the build outright.
+    local -a refresh_command=("$OPENCODE_BIN" models --refresh --pure)
+    if command -v timeout >/dev/null 2>&1; then
+        refresh_command=(timeout "$OPENCODE_CATALOG_REFRESH_TIMEOUT" "${refresh_command[@]}")
+    fi
+
+    if ! XDG_CACHE_HOME="$refresh_cache_dir" NO_COLOR=1 TERM=dumb \
+        "${refresh_command[@]}" >/dev/null 2>&1; then
+        echo "Error: OpenCode catalog refresh failed (offline, timeout, or CLI error)." >&2
+        echo "Retry with network access, or set OPENCODE_MODELS_FILE to a reviewed complete catalog snapshot." >&2
+        return 1
+    fi
+
+    OPENCODE_MODELS_FILE="$refresh_cache_dir/opencode/models.json"
+    if [ ! -r "$OPENCODE_MODELS_FILE" ]; then
+        echo "Error: OpenCode catalog refresh produced no cache at $OPENCODE_MODELS_FILE" >&2
         echo "Set OPENCODE_MODELS_FILE to a reviewed complete catalog snapshot." >&2
         return 1
     fi
 
-    if ! python3 - "$catalog_source" "$CATALOG_TEMP" <<'PYEOF'
-import base64
-import gzip
-import re
-import sys
-from pathlib import Path
-
-text = Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(r"^EMBEDDED_OPENCODE_MODELS_GZIP = '([^']+)'$", text, re.MULTILINE)
-if not match or not match.group(1):
-    raise SystemExit("generated bundle has no embedded OpenCode catalog")
-Path(sys.argv[2]).write_bytes(gzip.decompress(base64.b64decode(match.group(1), validate=True)))
-PYEOF
-    then
-        rm -f "$catalog_source"
-        echo "Error: failed to extract the reviewed catalog from $catalog_source_label" >&2
+    local catalog_summary
+    if ! catalog_summary=$(validate_opencode_models_file "$OPENCODE_MODELS_FILE"); then
+        echo "Error: the refreshed OpenCode catalog is incomplete or invalid: $OPENCODE_MODELS_FILE" >&2
+        echo "Set OPENCODE_MODELS_FILE to a reviewed complete catalog snapshot." >&2
         return 1
     fi
-    rm -f "$catalog_source"
 
-    OPENCODE_MODELS_FILE="$CATALOG_TEMP"
-    local catalog_summary
-    if catalog_summary=$(validate_opencode_models_file "$OPENCODE_MODELS_FILE"); then
-        echo "Using OpenCode catalog embedded in: $catalog_source_label"
-        echo "Catalog summary: $catalog_summary"
-        return 0
-    fi
-
-    echo "Error: the catalog embedded in $OUTPUT is incomplete or invalid." >&2
-    echo "Set OPENCODE_MODELS_FILE to a reviewed complete catalog snapshot." >&2
-    return 1
+    echo "Using refreshed OpenCode catalog"
+    echo "Catalog summary: $catalog_summary"
+    return 0
 }
 
 validate_embedded_opencode_catalog() {
@@ -330,11 +332,8 @@ validate_embedded_opencode_catalog "$BUILD_OUTPUT"
 
 chmod 755 "$BUILD_OUTPUT"
 mv -f "$BUILD_OUTPUT" "$OUTPUT"
-if [ -n "$CATALOG_TEMP" ]; then
-    rm -f "$CATALOG_TEMP"
-    CATALOG_TEMP=""
-fi
 trap - EXIT
+cleanup_build_output
 
 echo "Generated: $OUTPUT"
 echo "Total lines: $(wc -l < "$OUTPUT")"

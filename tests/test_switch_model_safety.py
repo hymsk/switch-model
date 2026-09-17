@@ -41,10 +41,42 @@ class SwitchModelSafetyTests(unittest.TestCase):
         self.assertNotIn("${sk:0:10}", generated)
         self.assertIn('"<redacted>"', generated)
 
-    def test_default_build_is_anchored_to_git_head_not_dirty_bundle(self):
+    def test_default_build_refreshes_catalog_instead_of_reusing_git_head(self):
         build = (ROOT / "build.sh").read_text(encoding="utf-8")
-        self.assertIn("git -C \"$SCRIPT_DIR\" show HEAD:switch-model.sh", build)
-        self.assertNotIn("grep -q '^# OpenCode catalog SHA256:", build)
+        # The catalog must be refreshed on every default build, not inherited
+        # from a previously committed generated bundle.
+        self.assertNotIn("git -C \"$SCRIPT_DIR\" show HEAD:switch-model.sh", build)
+        self.assertNotIn("HEAD:switch-model.sh", build)
+        self.assertIn("models --refresh --pure", build)
+        # The refresh must stay isolated from the developer's own OpenCode cache.
+        self.assertIn('XDG_CACHE_HOME="$refresh_cache_dir"', build)
+        # A failed refresh must fail the build instead of embedding a stale catalog.
+        self.assertIn("Error: OpenCode catalog refresh failed", build)
+
+    def test_default_build_fails_without_opencode_cli(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        environment = dict(os.environ)
+        environment["OPENCODE_BIN"] = "switch-model-missing-opencode-binary"
+        environment.pop("OPENCODE_MODELS_FILE", None)
+
+        completed = subprocess.run(
+            (bash, str(ROOT / "build.sh")),
+            cwd=str(ROOT),
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("was not found", completed.stderr)
+        self.assertIn("OPENCODE_MODELS_FILE", completed.stderr)
 
     def test_generated_model_fetch_never_writes_api_key_to_disk(self):
         generated = GENERATED_SCRIPT.read_text(encoding="utf-8")

@@ -176,19 +176,23 @@ DeepSeek 分组使用 `@ai-sdk/openai-compatible`，保留自定义渠道 ID，�
 
 ## 构建
 
-默认只复用 Git `HEAD:switch-model.sh` 中已审计的完整 catalog；不会信任工作区中的 dirty 生成物，也不会读取开发机 cache：
+默认每次构建都会先刷新 OpenCode catalog，再把刷新结果嵌入 `switch-model.sh`，因此产物始终跟踪当前发布的模型目录：
 
 ```bash
 bash build.sh
 ```
 
-首次构建、更新 catalog，或 Git `HEAD` 中仍是旧的不完整快照时，必须显式指定已审计的完整 OpenCode catalog。构建会拒绝只含少量 provider/model 或普遍缺少 `limit` 的 fixture/部分目录：
+刷新在隔离的临时 `XDG_CACHE_HOME` 中执行 `opencode models --refresh --pure`，既不读取也不改写开发机自身的 OpenCode cache，产出与运行环境无关的确定性快照。刷新失败（离线、超时、CLI 缺失或报错）会让构建直接失败，不会静默嵌入旧 catalog。
+
+需要脱离网络或固定某个 catalog 时，显式指定已审计的完整 catalog 文件，此时跳过刷新：
 
 ```bash
 OPENCODE_MODELS_FILE=/path/to/reviewed-models.json bash build.sh
 ```
 
-构建不会运行 `opencode models --refresh`。刷新只在运行时发生，即用户实际执行 `switch-model.sh opencode` 时。
+无论哪种来源，构建都会拒绝只含少量 provider/model 或普遍缺少 `limit` 的 fixture/部分目录。
+
+相关环境变量：`OPENCODE_BIN`（默认 `opencode`）、`OPENCODE_CATALOG_REFRESH_TIMEOUT`（默认 `180` 秒）。
 
 ## 验证
 

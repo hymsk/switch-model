@@ -36,6 +36,9 @@ update_opencode_config() {
     if [ "$catalog_refresh" = false ]; then
         sync_args+=(--no-catalog-refresh)
     fi
+    if [ "${INSECURE:-false}" = true ]; then
+        sync_args+=(--insecure)
+    fi
 
     mkdir -p "$(dirname "$report_file")"
 
@@ -95,6 +98,9 @@ preview_opencode_config() {
     fi
     if [ "$catalog_refresh" = false ]; then
         sync_args+=(--no-catalog-refresh)
+    fi
+    if [ "${INSECURE:-false}" = true ]; then
+        sync_args+=(--insecure)
     fi
 
     echo -e "${BLUE}=== OpenCode 配置预览 ===${NC}"

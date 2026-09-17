@@ -16,6 +16,7 @@ usage() {
     echo "  --sk-filename <name>    指定 SK 文件名（默认: $DEFAULT_SK_FILENAME）"
     echo "  --sk-file <path>        指定 SK 文件完整路径（优先级高于 --sk-filename）"
     echo "  --preview               预览模式，只输出配置文件位置与内容，不实际写入"
+    echo "  --insecure              忽略 TLS 证书校验，适用于自签名或内网服务（也可设置 SWITCH_MODEL_INSECURE=true）"
     echo ""
     echo "OpenCode Options:"
     echo "  provider                         OpenCode provider 名称；也可写入 $DEFAULT_PROVIDER_FILE（默认: $DEFAULT_OPENCODE_PROVIDER）"
@@ -179,6 +180,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-prefix-fallback)
             OPENCODE_PREFIX_FALLBACK=false
+            shift
+            ;;
+        --insecure)
+            INSECURE=true
             shift
             ;;
         --preview)

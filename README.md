@@ -56,6 +56,19 @@ API Key 文件建议使用 `0600` 权限。Preview 和错误输出不会显示 K
 
 请求模型列表时，API Key 通过 `curl --config -` 从 stdin 传入，既不写入临时文件，也不出现在进程参数列表中。
 
+### 忽略证书校验
+
+默认始终校验 TLS 证书，校验失败即停止，不会静默降级。对自签名证书或内网 HTTPS 服务，可显式关闭校验：
+
+```bash
+bash switch-model.sh claude https://api.example.com --insecure
+SWITCH_MODEL_INSECURE=true bash switch-model.sh opencode https://api.example.com
+```
+
+`--insecure` 对 Claude Code、Codex、OpenCode 三种模式均生效：模型列表请求（`curl`）和 OpenCode 的同步请求（内嵌 Python）都会跳过证书校验。设置 `SWITCH_MODEL_INSECURE=true`（接受 `1`、`true`、`yes`、`on`，忽略大小写）等效于传入该选项；其他取值（包括空值和 `0`、`false`）保持默认校验。开启时会在 stderr 输出明确警告。
+
+只应对可信服务使用该选项：关闭校验后无法发现中间人攻击或证书域名不匹配。
+
 Claude Code 和 Codex 的目标配置会保存实际 Key；其备份也包含 Key。OpenCode 默认写入 `{file:...}` 引用，不把 Key 值写入主配置。
 
 ## 使用

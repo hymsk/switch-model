@@ -22,8 +22,13 @@ fetch_bearer_json() {
     # 也不让 API Key 出现在进程参数列表中。
     local escaped_key
     escaped_key=$(printf '%s' "$api_key" | sed 's/[\\"]/\\&/g')
-    printf 'header = "Authorization: Bearer %s"\n' "$escaped_key" \
-        | curl --fail --silent --show-error --location --config - "$url" 2>/dev/null
+    {
+        printf 'header = "Authorization: Bearer %s"\n' "$escaped_key"
+        # 仅在显式开启时关闭证书校验；跳过的指令不会出现在默认路径。
+        if [ "${INSECURE:-false}" = true ]; then
+            printf 'insecure\n'
+        fi
+    } | curl --fail --silent --show-error --location --config - "$url" 2>/dev/null
 }
 
 # 获取模型列表
@@ -34,7 +39,11 @@ fetch_models() {
     local api_key="$2"
     local models_url=$(get_models_url "$api_base")
 
-    # 默认校验证书；HTTPS 校验失败时停止，不降级为不安全连接。
+    # 默认校验证书；只有显式 --insecure / SWITCH_MODEL_INSECURE=true 才跳过校验。
+    if [ "${INSECURE:-false}" = true ]; then
+        echo -e "${YELLOW}警告: 已忽略 TLS 证书校验，仅对可信的内网或自签名服务使用${NC}" >&2
+    fi
+
     local response
     response=$(fetch_bearer_json "$models_url" "$api_key") || return 1
 

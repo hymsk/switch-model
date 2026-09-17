@@ -9,6 +9,7 @@
 
 ### Other changes
 
+- 新增 `--insecure` 与 `SWITCH_MODEL_INSECURE=true`，对三种模式统一跳过模型列表请求的 TLS 证书校验；OpenCode 同步器同样收到该选项。默认保持校验，开启时输出警告。
 - 新增 `~/.config/api-keys/default.provider`，文件内容作为 OpenCode provider 名称；命令行位置参数优先。
 - 请求模型列表时通过 `curl --config -` 从 stdin 传递认证头，不再写入临时文件，API Key 不出现在磁盘或进程参数中。
 - `--context` 支持逗号分隔的多个值，并为每个小于原生窗口的值生成一个 capped 子模式；重复值合并。

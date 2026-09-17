@@ -28,6 +28,15 @@ DEFAULT_PROVIDER_FILE="$DEFAULT_SK_DIR/$DEFAULT_PROVIDER_FILENAME"
 # API 提供商 URL；环境变量优先于默认 URL 文件。
 DEFAULT_API_URL="${SWITCH_MODEL_BASE_URL:-}"
 
+# 是否忽略 TLS 证书校验；仅在显式传入 --insecure 或设置
+# SWITCH_MODEL_INSECURE=true 时开启，默认保持证书校验。
+INSECURE=false
+case "${SWITCH_MODEL_INSECURE:-}" in
+    1|true|TRUE|True|yes|YES|on|ON)
+        INSECURE=true
+        ;;
+esac
+
 # Claude 默认模型
 DEFAULT_CLAUDE_MODEL="opus"
 

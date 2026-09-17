@@ -1997,6 +1997,15 @@ DEFAULT_PROVIDER_FILE="$DEFAULT_SK_DIR/$DEFAULT_PROVIDER_FILENAME"
 # API 提供商 URL；环境变量优先于默认 URL 文件。
 DEFAULT_API_URL="${SWITCH_MODEL_BASE_URL:-}"
 
+# 是否忽略 TLS 证书校验；仅在显式传入 --insecure 或设置
+# SWITCH_MODEL_INSECURE=true 时开启，默认保持证书校验。
+INSECURE=false
+case "${SWITCH_MODEL_INSECURE:-}" in
+    1|true|TRUE|True|yes|YES|on|ON)
+        INSECURE=true
+        ;;
+esac
+
 # Claude 默认模型
 DEFAULT_CLAUDE_MODEL="opus"
 
@@ -2214,8 +2223,13 @@ fetch_bearer_json() {
     # 也不让 API Key 出现在进程参数列表中。
     local escaped_key
     escaped_key=$(printf '%s' "$api_key" | sed 's/[\\"]/\\&/g')
-    printf 'header = "Authorization: Bearer %s"\n' "$escaped_key" \
-        | curl --fail --silent --show-error --location --config - "$url" 2>/dev/null
+    {
+        printf 'header = "Authorization: Bearer %s"\n' "$escaped_key"
+        # 仅在显式开启时关闭证书校验；跳过的指令不会出现在默认路径。
+        if [ "${INSECURE:-false}" = true ]; then
+            printf 'insecure\n'
+        fi
+    } | curl --fail --silent --show-error --location --config - "$url" 2>/dev/null
 }
 
 # 获取模型列表
@@ -2226,7 +2240,11 @@ fetch_models() {
     local api_key="$2"
     local models_url=$(get_models_url "$api_base")
 
-    # 默认校验证书；HTTPS 校验失败时停止，不降级为不安全连接。
+    # 默认校验证书；只有显式 --insecure / SWITCH_MODEL_INSECURE=true 才跳过校验。
+    if [ "${INSECURE:-false}" = true ]; then
+        echo -e "${YELLOW}警告: 已忽略 TLS 证书校验，仅对可信的内网或自签名服务使用${NC}" >&2
+    fi
+
     local response
     response=$(fetch_bearer_json "$models_url" "$api_key") || return 1
 
@@ -2717,6 +2735,9 @@ update_opencode_config() {
     if [ "$catalog_refresh" = false ]; then
         sync_args+=(--no-catalog-refresh)
     fi
+    if [ "${INSECURE:-false}" = true ]; then
+        sync_args+=(--insecure)
+    fi
 
     mkdir -p "$(dirname "$report_file")"
 
@@ -2776,6 +2797,9 @@ preview_opencode_config() {
     fi
     if [ "$catalog_refresh" = false ]; then
         sync_args+=(--no-catalog-refresh)
+    fi
+    if [ "${INSECURE:-false}" = true ]; then
+        sync_args+=(--insecure)
     fi
 
     echo -e "${BLUE}=== OpenCode 配置预览 ===${NC}"
@@ -2910,6 +2934,7 @@ usage() {
     echo "  --sk-filename <name>    指定 SK 文件名（默认: $DEFAULT_SK_FILENAME）"
     echo "  --sk-file <path>        指定 SK 文件完整路径（优先级高于 --sk-filename）"
     echo "  --preview               预览模式，只输出配置文件位置与内容，不实际写入"
+    echo "  --insecure              忽略 TLS 证书校验，适用于自签名或内网服务（也可设置 SWITCH_MODEL_INSECURE=true）"
     echo ""
     echo "OpenCode Options:"
     echo "  provider                         OpenCode provider 名称；也可写入 $DEFAULT_PROVIDER_FILE（默认: $DEFAULT_OPENCODE_PROVIDER）"
@@ -3073,6 +3098,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-prefix-fallback)
             OPENCODE_PREFIX_FALLBACK=false
+            shift
+            ;;
+        --insecure)
+            INSECURE=true
             shift
             ;;
         --preview)

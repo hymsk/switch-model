@@ -113,6 +113,179 @@ class SwitchModelSafetyTests(unittest.TestCase):
         residue = sorted(Path(tempfile.gettempdir()).glob("switch-model-header.*"))
         self.assertEqual([], residue, "no credential header file may be left in tmp")
 
+    def test_model_fetch_keeps_tls_verification_unless_insecure_is_requested(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, remainder = generated.partition("# === 03-model-fetch.sh ===")
+        self.assertTrue(marker, "generated script must retain the model-fetch boundary")
+        module = remainder.split("# === 04-claude.sh ===")[0]
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            captured = directory_path / "captured-config.txt"
+            fake_curl = directory_path / "curl"
+            fake_curl.write_text(
+                "#!/bin/bash\ncat > \"$CAPTURE_FILE\"\nprintf '{\"data\":[{\"id\":\"m\"}]}'\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+
+            harness = directory_path / "fetch.sh"
+            harness.write_text(
+                prefix
+                + module
+                + '\nprintf "insecure=%s\\n" "${INSECURE:-false}"\n'
+                + "\nfetch_bearer_json 'https://api.example.com/v1/models' \"$TEST_KEY\"\n",
+                encoding="utf-8",
+            )
+
+            def run_with(environment_overrides):
+                environment = dict(os.environ)
+                environment["PATH"] = f"{directory_path}:{environment['PATH']}"
+                environment["CAPTURE_FILE"] = str(captured)
+                environment["TEST_KEY"] = "test-key-not-real"
+                environment.update(environment_overrides)
+                result = subprocess.run(
+                    (bash, str(harness)),
+                    cwd=str(ROOT),
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+                return result, captured.read_text(encoding="utf-8")
+
+            completed, config_text = run_with({})
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            # Default path must not send `insecure` to curl.
+            self.assertNotIn("insecure", config_text)
+            self.assertEqual(1, config_text.count("\n"), config_text)
+
+            completed, config_text = run_with({"SWITCH_MODEL_INSECURE": "true"})
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("insecure=true", completed.stdout)
+            self.assertIn("insecure\n", config_text)
+            self.assertIn("Authorization: Bearer", config_text)
+
+            for value in ("", "0", "false", "no", "off"):
+                with self.subTest(value=value):
+                    completed, config_text = run_with({"SWITCH_MODEL_INSECURE": value})
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    self.assertNotIn("insecure\n", config_text)
+
+    def test_generated_shell_forwards_insecure_only_when_requested(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, _ = generated.partition("# === 07-main.sh ===")
+        self.assertTrue(marker, "generated script must retain the main-module boundary")
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            key_file = temporary / "test.sk"
+            key_file.write_text("test-key-not-real\n", encoding="utf-8")
+            harness = temporary / "invoke-opencode-sync.sh"
+            harness.write_text(
+                prefix
+                + r'''
+run_opencode_sync() {
+    local saw_insecure=false
+    for argument in "$@"; do
+        if [ "$argument" = "--insecure" ]; then
+            saw_insecure=true
+        fi
+    done
+    printf 'forwarded-insecure=%s\n' "$saw_insecure"
+    return 0
+}
+
+SK_FILE="$TEST_KEY_FILE"
+INSECURE="$TEST_INSECURE"
+update_opencode_config "https://api.example.com" "MyProvider" "MyProvider" "0"
+''',
+                encoding="utf-8",
+            )
+
+            def run_with(value):
+                environment = dict(os.environ)
+                environment.update(TEST_KEY_FILE=str(key_file), TEST_INSECURE=value)
+                return subprocess.run(
+                    (bash, str(harness)),
+                    cwd=str(ROOT),
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+
+            disabled = run_with("false")
+            self.assertEqual(0, disabled.returncode, disabled.stdout + disabled.stderr)
+            self.assertIn("forwarded-insecure=false", disabled.stdout)
+
+            enabled = run_with("true")
+            self.assertEqual(0, enabled.returncode, enabled.stdout + enabled.stderr)
+            self.assertIn("forwarded-insecure=true", enabled.stdout)
+
+    def test_generated_shell_parses_insecure_flag_and_environment(self):
+        bash = shutil.which("bash") or shutil.which("bash.exe")
+        if bash is None:
+            self.skipTest("bash is not available")
+
+        generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
+        prefix, marker, main = generated.partition("# === 07-main.sh ===")
+        self.assertTrue(marker, "generated script must retain the main-module boundary")
+
+        with tempfile.TemporaryDirectory() as directory:
+            harness = Path(directory) / "invoke-switch-model.sh"
+            harness.write_text(
+                prefix
+                + '\nopencode_main() { printf "insecure=%s\\n" "${INSECURE:-false}"; }\n'
+                + marker
+                + main,
+                encoding="utf-8",
+            )
+
+            def run_with(arguments, environment_overrides=None):
+                environment = dict(os.environ)
+                environment.update(environment_overrides or {})
+                return subprocess.run(
+                    (bash, str(harness), *arguments),
+                    cwd=str(ROOT),
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+
+            default_run = run_with(["opencode", "https://api.example.com"], {"SWITCH_MODEL_INSECURE": ""})
+            self.assertEqual(0, default_run.returncode, default_run.stdout + default_run.stderr)
+            self.assertIn("insecure=false", default_run.stdout)
+
+            flag_run = run_with(["opencode", "https://api.example.com", "--insecure"])
+            self.assertEqual(0, flag_run.returncode, flag_run.stdout + flag_run.stderr)
+            self.assertIn("insecure=true", flag_run.stdout)
+
+            environment_run = run_with(
+                ["opencode", "https://api.example.com"],
+                {"SWITCH_MODEL_INSECURE": "true"},
+            )
+            self.assertEqual(0, environment_run.returncode, environment_run.stdout + environment_run.stderr)
+            self.assertIn("insecure=true", environment_run.stdout)
+
     def test_generated_shell_has_no_provider_replacement_gate(self):
         generated = GENERATED_SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("--replace-providers", generated)
